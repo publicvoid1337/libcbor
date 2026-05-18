@@ -5,47 +5,99 @@
 #include <stdio.h>
 #include "cbor.h"
 
+typedef enum {
+  PACKED_ERR_NONE,
+  PACKED_ERR_UNDEFINED_REFERENCE,
+  PACKED_ERR_OUT_OF_BOUNDS,
+  PACKED_ERR_UNEXPECTED_FORMAT,
+  PACKED_ERR_NOT_SUPPORTED,
+  _NESTED
+} packed_error_t;
+
 typedef struct {
   cbor_item_t* item;
   size_t index;
   int key_or_value;  // 0 for key, 1 for value
 } cbor_parent_t;
 
-typedef enum {
-  PACKED_ERR_NONE,
-  PACKED_ERR_UNDEFINED_REFERENCE,
-  PACKED_ERR_OUT_OF_BOUNDS,
-  PACKED_ERR_UNEXPECTED_FORMAT,
-  PACKED_ERR_NOT_SUPPORTED
-} packed_error_t;
+// NEW
+typedef struct {
+  cbor_item_t* item;
+  size_t index;
+  bool is_key;
+} parent_t;
 
-packed_error_t _walk_and_replace(cbor_parent_t parent, cbor_item_t* item,
-                                 cbor_item_t* current_packing_table,
-                                 cbor_item_t** root);
+typedef struct callback {
+  cbor_item_t* new_item;
+  cbor_item_t* new_packing_table;
+} callback_t;
 
-packed_error_t _replace(cbor_parent_t parent, cbor_item_t* item,
-                        cbor_item_t* new_item, cbor_item_t** root) {
-  // Root replacement is handled by the walk algorithm itself.
+typedef struct {
+  packed_error_t error;  // Should be something with more semantics
+  callback_t callback;
+} response_t;
+
+typedef struct {
+  parent_t parent;
+  cbor_item_t* item;
+  cbor_item_t* current_packing_table;  // should me multiple in the future
+} recursion_info_t;
+
+#define HANDLE_CALLBACK(rec_inf, callback)                        \
+  do {                                                            \
+    if (callback.new_item != NULL) {                              \
+      rec_inf.item = callback.new_item;                           \
+    }                                                             \
+    if (callback.new_packing_table != NULL) {                     \
+      rec_inf.current_packing_table = callback.new_packing_table; \
+    }                                                             \
+  } while (0)
+
+response_t _new_response(packed_error_t error, cbor_item_t* cb_new_item,
+                         cbor_item_t* cb_new_packing_table) {
+  callback_t cb = {.new_item = cb_new_item,
+                   .new_packing_table = cb_new_packing_table};
+  response_t resp = {.error = error, .callback = cb};
+  return resp;
+}
+
+recursion_info_t _new_rec_info(cbor_item_t* new_packing_table,
+                               cbor_item_t* new_item,
+                               cbor_item_t* new_parent_item,
+                               size_t new_parent_idx, bool new_parent_is_key) {
+  parent_t parent = {.index = new_parent_idx,
+                     .item = new_parent_item,
+                     .is_key = new_parent_is_key};
+  recursion_info_t rec_inf = {.parent = parent,
+                              .current_packing_table = new_packing_table,
+                              .item = new_item};
+  return rec_inf;
+}
+
+response_t _replace_N(parent_t parent, cbor_item_t* item,
+                      cbor_item_t* new_item) {
+  (void)item;
   if (parent.item == NULL) {
-    cbor_decref(&item);
-    *root = new_item;
-    return PACKED_ERR_NONE;
+    return _new_response(PACKED_ERR_NONE, new_item, NULL);
   }
   switch (cbor_typeof(parent.item)) {
     case CBOR_TYPE_ARRAY: {
       cbor_item_t* old_item = cbor_array_get(parent.item, parent.index);
+      if (!cbor_array_replace(parent.item, parent.index, new_item)) {
+        if (old_item != NULL) {
+          cbor_decref(&old_item);
+        }
+        return _new_response(PACKED_ERR_OUT_OF_BOUNDS, NULL, NULL);
+      }
       if (old_item != NULL) {
         cbor_decref(&old_item);
-      }
-      if (!cbor_array_replace(parent.item, parent.index, new_item)) {
-        return PACKED_ERR_OUT_OF_BOUNDS;
       }
       break;
     }
     case CBOR_TYPE_MAP: {
       struct cbor_pair* pairs = cbor_map_handle(parent.item);
       cbor_item_t* old_item;
-      if (parent.key_or_value == 0) {
+      if (parent.is_key) {
         old_item = pairs[parent.index].key;
         pairs[parent.index].key = cbor_move(new_item);
       } else {
@@ -66,178 +118,200 @@ packed_error_t _replace(cbor_parent_t parent, cbor_item_t* item,
       break;
     }
     default:
-      return PACKED_ERR_UNEXPECTED_FORMAT;
+      return _new_response(PACKED_ERR_UNEXPECTED_FORMAT, NULL, NULL);
   }
-  return PACKED_ERR_NONE;
+  return _new_response(PACKED_ERR_NONE, new_item, NULL);
 }
 
-/* Returns reference to packing table (cbor array) */
-cbor_item_t* _consume_table_113(cbor_parent_t parent, cbor_item_t* item,
-                                cbor_item_t** new_root) {
+response_t _handle_tag_113(parent_t parent, cbor_item_t* item) {
   cbor_item_t* arr = cbor_tag_item(item);
-  assert(cbor_typeof(arr) == CBOR_TYPE_ARRAY);  // todo change to error handling
+  if (arr == NULL) {
+    return _new_response(PACKED_ERR_UNEXPECTED_FORMAT, NULL, NULL);
+  }
+  if (cbor_typeof(arr) != CBOR_TYPE_ARRAY) {
+    return _new_response(PACKED_ERR_UNEXPECTED_FORMAT, NULL, NULL);
+  }
+
   cbor_item_t* packing_table = cbor_array_get(arr, 0);
-  assert(cbor_typeof(packing_table) ==
-         CBOR_TYPE_ARRAY);  // todo change to error handling
-  cbor_item_t* _new_root = cbor_array_get(arr, 1);
-
-  cbor_incref(packing_table);
-  cbor_incref(_new_root);
-  *new_root = _new_root;
-
-  if (parent.item != NULL) {
-    _replace(parent, item, _new_root, new_root);
+  if (packing_table == NULL) {
+    return _new_response(PACKED_ERR_UNEXPECTED_FORMAT, NULL, NULL);
+  }
+  if (cbor_typeof(packing_table) != CBOR_TYPE_ARRAY) {
+    return _new_response(PACKED_ERR_UNEXPECTED_FORMAT, NULL, NULL);
   }
 
-  return packing_table;
-}
-
-/* SHARED ITEM REFERENCE or ARGUMENT REFERENCE */
-packed_error_t _handle_tag_6(cbor_parent_t parent, cbor_item_t* item,
-                             cbor_item_t* current_packing_table,
-                             cbor_item_t** root) {
-  cbor_item_t* sub = cbor_tag_item(item);
-  packed_error_t result = PACKED_ERR_NONE;
-
-  switch (cbor_typeof(sub)) {
-    case CBOR_TYPE_UINT: { /* SHARED ITEM REFERENCE */
-      // TODO: properly calculate index
-      size_t index = cbor_get_uint8(sub);
-      if (current_packing_table == NULL ||
-          index >= cbor_array_size(current_packing_table)) {
-        result = PACKED_ERR_UNDEFINED_REFERENCE;
-      } else {
-        cbor_item_t* unpacked_item =
-            cbor_array_get(current_packing_table, index);
-        _replace(parent, item, unpacked_item, root);
-        cbor_decref(&unpacked_item);
-      }
-      break;
-    }
-    case CBOR_TYPE_NEGINT: { /* SHARED ITEM REFERENCE */
-      result = PACKED_ERR_NOT_SUPPORTED;
-      break;
-    }
-    case CBOR_TYPE_ARRAY: { /* ARGUMENT REFERENCE */
-      result = PACKED_ERR_NOT_SUPPORTED;
-      break;
-    }
-    case CBOR_TYPE_TAG: { /* most likely nested */
-      // TODO: for now we assume only other tags 6 can be nested
-      puts("handle_tag_6: TAG");
-      cbor_parent_t new_parent = {.item = item};
-      cbor_item_t* nested_tag = cbor_tag_item(item);
-      _walk_and_replace(new_parent, nested_tag, current_packing_table, root);
-      cbor_decref(&nested_tag);
-      _handle_tag_6(parent, item, current_packing_table, root);
-      break;
-    }
-    default: {
-      result = PACKED_ERR_UNEXPECTED_FORMAT;
-    }
+  cbor_item_t* packed_data = cbor_array_get(arr, 1);
+  if (packed_data == NULL) {
+    return _new_response(PACKED_ERR_UNEXPECTED_FORMAT, NULL, NULL);
   }
-  cbor_decref(&sub);
-  return result;
+  response_t resp = _replace_N(parent, item, packed_data);
+  if (resp.error != PACKED_ERR_NONE) {
+    return resp;
+  }
+  return _new_response(PACKED_ERR_NONE, resp.callback.new_item, packing_table);
 }
 
-// todo: increase max nesting depth
-packed_error_t _walk_and_replace(cbor_parent_t parent, cbor_item_t* item,
-                                 cbor_item_t* current_packing_table,
-                                 cbor_item_t** root) {
-  switch (cbor_typeof(item)) {
+response_t _handle_tag_6(cbor_item_t* packing_table, parent_t parent,
+                         cbor_item_t* item) {
+  cbor_item_t* tag_item = cbor_tag_item(item);
+  if (tag_item == NULL) {
+    return _new_response(PACKED_ERR_UNEXPECTED_FORMAT, NULL, NULL);
+  }
+
+  if (cbor_typeof(tag_item) == CBOR_TYPE_UINT) {
+    size_t index = cbor_get_uint8(tag_item);
+    if (packing_table == NULL || index >= cbor_array_size(packing_table)) {
+      cbor_decref(&tag_item);
+      return _new_response(PACKED_ERR_UNDEFINED_REFERENCE, NULL, NULL);
+    }
+
+    cbor_item_t* unpacked_item = cbor_array_get(packing_table, index);
+    response_t resp = _replace_N(parent, item, unpacked_item);
+    if (resp.error != PACKED_ERR_NONE) {
+      cbor_decref(&unpacked_item);
+      cbor_decref(&tag_item);
+      return resp;
+    }
+
+    if (parent.item != NULL && cbor_typeof(parent.item) != CBOR_TYPE_MAP) {
+      cbor_decref(&unpacked_item);
+    }
+    cbor_decref(&tag_item);
+    return resp;
+  }
+
+  cbor_decref(&tag_item);
+
+  return _new_response(_NESTED, NULL, NULL);
+}
+
+response_t _traverse(recursion_info_t rec_inf) {
+  switch (cbor_typeof(rec_inf.item)) {
     case CBOR_TYPE_ARRAY: {
-      for (size_t i = 0; i < cbor_array_size(item); i++) {
-        cbor_parent_t new_parent = {.item = item, .index = i};
-        cbor_item_t* child = cbor_array_get(item, i);
-        packed_error_t error =
-            _walk_and_replace(new_parent, child, current_packing_table, root);
-        cbor_decref(&child);
-        if (error != PACKED_ERR_NONE) {
-          return error;
+      for (size_t i = 0; i < cbor_array_size(rec_inf.item); i++) {
+        cbor_item_t* child = cbor_array_get(rec_inf.item, i);
+        response_t resp = _traverse(_new_rec_info(
+            rec_inf.current_packing_table, child, rec_inf.item, i, false));
+        if (resp.error != PACKED_ERR_NONE) {
+          return resp;
         }
+        if (resp.callback.new_packing_table != NULL) {
+          rec_inf.current_packing_table = resp.callback.new_packing_table;
+        }
+        cbor_decref(&child);
       }
-      break;
+      return _new_response(PACKED_ERR_NONE, NULL, NULL);
     }
     case CBOR_TYPE_MAP: {
-      struct cbor_pair* pairs = cbor_map_handle(item);
-      for (size_t i = 0; i < cbor_map_size(item); i++) {
-        cbor_parent_t new_parent = {
-            .item = item, .index = i, .key_or_value = 0};
-        _walk_and_replace(new_parent, pairs[i].key, current_packing_table,
-                          root);
-        new_parent.key_or_value = 1;
-        _walk_and_replace(new_parent, pairs[i].value, current_packing_table,
-                          root);
+      struct cbor_pair* pairs = cbor_map_handle(rec_inf.item);
+      for (size_t i = 0; i < cbor_map_size(rec_inf.item); i++) {
+        response_t resp;
+        cbor_item_t* key = cbor_incref(pairs[i].key);
+        resp = _traverse(_new_rec_info(rec_inf.current_packing_table, key,
+                                       rec_inf.item, i, true));
+        if (resp.error != PACKED_ERR_NONE) {
+          cbor_decref(&key);
+          return resp;
+        }
+        if (resp.callback.new_packing_table != NULL) {
+          rec_inf.current_packing_table = resp.callback.new_packing_table;
+        }
+        cbor_decref(&key);
+
+        cbor_item_t* value = cbor_incref(pairs[i].value);
+        resp = _traverse(_new_rec_info(rec_inf.current_packing_table, value,
+                                       rec_inf.item, i, false));
+        if (resp.error != PACKED_ERR_NONE) {
+          cbor_decref(&value);
+          return resp;
+        }
+        if (resp.callback.new_packing_table != NULL) {
+          rec_inf.current_packing_table = resp.callback.new_packing_table;
+        }
+        cbor_decref(&value);
       }
-      break;
+      return _new_response(PACKED_ERR_NONE, NULL, NULL);
     }
-    case CBOR_TYPE_TAG:
-      switch (cbor_tag_value(item)) {
-        /* PACKING TABLE SETUP */
+    case CBOR_TYPE_TAG: {
+      switch (cbor_tag_value(rec_inf.item)) {
         case 113: {
-          cbor_item_t* new_root;
-          cbor_item_t* packing_table =
-              _consume_table_113(parent, item, &new_root);
-          if (parent.item == NULL) {
-            cbor_decref(&item);
-            item = new_root;
+          response_t resp = _handle_tag_113(rec_inf.parent, rec_inf.item);
+          if (resp.error != PACKED_ERR_NONE) {
+            return resp;
           }
-          packed_error_t error =
-              _walk_and_replace(parent, new_root, packing_table, root);
-          cbor_decref(&packing_table);
-          cbor_decref(&new_root);
-          if (error != PACKED_ERR_NONE) {
-            return error;
+          HANDLE_CALLBACK(rec_inf, resp.callback);
+
+          resp = _traverse(_new_rec_info(
+              rec_inf.current_packing_table, rec_inf.item, rec_inf.parent.item,
+              rec_inf.parent.index, rec_inf.parent.is_key));
+          if (resp.error != PACKED_ERR_NONE) {
+            return resp;
           }
-          break;
+          HANDLE_CALLBACK(rec_inf, resp.callback);
+
+          return _new_response(PACKED_ERR_NONE, rec_inf.item,
+                               rec_inf.current_packing_table);
         }
-        case 128:
-        case 129:
-        case 130:
-        case 131:
-        case 132:
-        case 133:
-        case 134:
-        case 135:
-        case 136:
-        case 137:
-        case 138:
-        case 139:
-        case 140:
-        case 141:
-        case 142:
-        case 143: {
-          size_t tag_num = cbor_tag_value(item);
-          size_t index;
-          if (tag_num < 136) {
-            index = tag_num - 128;
-          } else {
-            index = tag_num - 136;
-          }
-        }
-        /* SHARED ITEM REFERENCE or ARGUMENT REFERENCE */
         case 6: {
-          // TODO: catch error returned by function below
-          _handle_tag_6(parent, item, current_packing_table, root);
-          break;
+          response_t resp = _handle_tag_6(rec_inf.current_packing_table,
+                                          rec_inf.parent, rec_inf.item);
+          if (resp.error != PACKED_ERR_NONE) {
+            return resp;
+          }
+
+          if (resp.error == _NESTED) {
+            cbor_item_t* tag_child = cbor_tag_item(rec_inf.item);
+            resp = _traverse(_new_rec_info(rec_inf.current_packing_table,
+                                           tag_child, rec_inf.item, 0, false));
+            cbor_decref(&tag_child);
+            if (resp.error != PACKED_ERR_NONE) {
+              return resp;
+            }
+            if (resp.callback.new_packing_table != NULL) {
+              rec_inf.current_packing_table = resp.callback.new_packing_table;
+            }
+
+            resp = _handle_tag_6(rec_inf.current_packing_table, rec_inf.parent,
+                                 rec_inf.item);
+            if (resp.error != PACKED_ERR_NONE) {
+              return resp;
+            }
+            HANDLE_CALLBACK(rec_inf, resp.callback);
+
+            return resp;
+          } else if (resp.error == PACKED_ERR_NONE) {
+            HANDLE_CALLBACK(rec_inf, resp.callback);
+            return _new_response(PACKED_ERR_NONE, rec_inf.item, NULL);
+          }
         }
-        /* Tag not specified by packed cbor */
         default: {
-          cbor_parent_t new_parent = {.item = item};
-          cbor_item_t* tag_child = cbor_tag_item(item);
-          _walk_and_replace(new_parent, tag_child, current_packing_table, root);
+          /* Tag not specified by packed cbor */
+          cbor_item_t* tag_child = cbor_tag_item(rec_inf.item);
+          response_t resp =
+              _traverse(_new_rec_info(rec_inf.current_packing_table, tag_child,
+                                      rec_inf.item, 0, false));
           cbor_decref(&tag_child);
-          break;
+          if (resp.error != PACKED_ERR_NONE) {
+            return resp;
+          }
+          if (resp.callback.new_packing_table != NULL) {
+            rec_inf.current_packing_table = resp.callback.new_packing_table;
+          }
+
+          return _new_response(PACKED_ERR_NONE, NULL, NULL);
         }
       }
-      break;
+    }
     default: {
-      /* Normal leaf node - nothing to do */
-      break;
+      /* normal leaf node */
+      return _new_response(PACKED_ERR_NONE, NULL, NULL);
     }
   }
-  return PACKED_ERR_NONE;
 }
+
+// NEW
+
+// todo: increase max nesting depth
 
 //
 //
@@ -273,20 +347,19 @@ unsigned char DATA[] = {
     0x63, 0x6F, 0x6C, 0x6F, 0x72, 0x63, 0x72, 0x65, 0x64, 0xC6, 0x00, 0xFB,
     0x40, 0x33, 0xF3, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33};
 
-unsigned char DATA2[] = {0x82, 0xD8, 0x71, 0x82, 0x81, 0xC6, 0x00, 0xD8, 0x71,
-                         0x82, 0x81, 0x6C, 0x6E, 0x65, 0x73, 0x74, 0x65, 0x64,
-                         0x20, 0x76, 0x61, 0x6C, 0x75, 0x65, 0xc6, 0x00, 0x00};
+unsigned char DATA2[] = {0xD8, 0x71, 0x82, 0x83, 0x63, 0x61, 0x62,
+                         0x63, 0x00, 0x01, 0xC6, 0xC6, 0xC6, 0x02};
 
 int main(void) {
   struct cbor_load_result res;
-  cbor_item_t* item = cbor_load(DATA2, sizeof(DATA2), &res);
+  cbor_item_t* item = cbor_load(DATA, sizeof(DATA), &res);
   assert(res.error.code == CBOR_ERR_NONE);
   cbor_describe(item, stdout);
-
   size_t serialized_size = cbor_serialized_size(item);
   printf("\n\nSerialized size: %zu bytes\n", serialized_size);
 
   puts("\n\n");
+  /*
   cbor_item_t** root = &item;
   cbor_parent_t parent = {.item = NULL};
 
@@ -295,12 +368,22 @@ int main(void) {
     fprintf(stderr, "Error occurred while walking and replacing items\n");
     return 1;
   }
+  */
+  recursion_info_t rec_inf = _new_rec_info(NULL, item, NULL, 0, false);
+  response_t resp = _traverse(rec_inf);
+  if (resp.error != PACKED_ERR_NONE) {
+    puts("crashed");
+  } else {
+    HANDLE_CALLBACK(rec_inf, resp.callback);
+  }
 
-  cbor_describe(*root, stdout);
-
-  serialized_size = cbor_serialized_size(item);
+  cbor_describe(rec_inf.item, stdout);
+  serialized_size = cbor_serialized_size(rec_inf.item);
   printf("\n\nSerialized size: %zu bytes\n", serialized_size);
 
-  cbor_decref(&item);
+  cbor_decref(&rec_inf.item);
+  if (rec_inf.current_packing_table != NULL) {
+    cbor_decref(&rec_inf.current_packing_table);
+  }
   return 0;
 }
