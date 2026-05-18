@@ -74,9 +74,27 @@ recursion_info_t _new_rec_info(cbor_item_t* new_packing_table,
   return rec_inf;
 }
 
+char* describe_error(packed_error_t error) {
+  switch (error) {
+    case PACKED_ERR_NONE:
+      return "No error";
+    case PACKED_ERR_UNDEFINED_REFERENCE:
+      return "Undefined reference in packing table";
+    case PACKED_ERR_OUT_OF_BOUNDS:
+      return "Index out of bounds in packing table";
+    case PACKED_ERR_UNEXPECTED_FORMAT:
+      return "Unexpected format in packed CBOR data";
+    case PACKED_ERR_NOT_SUPPORTED:
+      return "Packed CBOR feature not supported";
+    case _NESTED:
+      return "Nested structure requires additional handling";
+    default:
+      return "Unknown error";
+  }
+}
+
 response_t _replace_N(parent_t parent, cbor_item_t* item,
                       cbor_item_t* new_item) {
-  (void)item;
   if (parent.item == NULL) {
     return _new_response(PACKED_ERR_NONE, new_item, NULL);
   }
@@ -172,6 +190,7 @@ response_t _handle_tag_6(cbor_item_t* packing_table, parent_t parent,
       cbor_decref(&tag_item);
       return resp;
     }
+    // HANDLE_CALLBACK(rec_inf, resp.callback);
 
     if (parent.item != NULL && cbor_typeof(parent.item) != CBOR_TYPE_MAP) {
       cbor_decref(&unpacked_item);
@@ -195,9 +214,7 @@ response_t _traverse(recursion_info_t rec_inf) {
         if (resp.error != PACKED_ERR_NONE) {
           return resp;
         }
-        if (resp.callback.new_packing_table != NULL) {
-          rec_inf.current_packing_table = resp.callback.new_packing_table;
-        }
+        HANDLE_CALLBACK(rec_inf, resp.callback);
         cbor_decref(&child);
       }
       return _new_response(PACKED_ERR_NONE, NULL, NULL);
@@ -213,9 +230,7 @@ response_t _traverse(recursion_info_t rec_inf) {
           cbor_decref(&key);
           return resp;
         }
-        if (resp.callback.new_packing_table != NULL) {
-          rec_inf.current_packing_table = resp.callback.new_packing_table;
-        }
+        HANDLE_CALLBACK(rec_inf, resp.callback);
         cbor_decref(&key);
 
         cbor_item_t* value = cbor_incref(pairs[i].value);
@@ -225,9 +240,7 @@ response_t _traverse(recursion_info_t rec_inf) {
           cbor_decref(&value);
           return resp;
         }
-        if (resp.callback.new_packing_table != NULL) {
-          rec_inf.current_packing_table = resp.callback.new_packing_table;
-        }
+        HANDLE_CALLBACK(rec_inf, resp.callback);
         cbor_decref(&value);
       }
       return _new_response(PACKED_ERR_NONE, NULL, NULL);
@@ -249,16 +262,19 @@ response_t _traverse(recursion_info_t rec_inf) {
           }
           HANDLE_CALLBACK(rec_inf, resp.callback);
 
-          return _new_response(PACKED_ERR_NONE, rec_inf.item,
-                               rec_inf.current_packing_table);
+          if (rec_inf.parent.item != NULL) {
+            return _new_response(PACKED_ERR_NONE, NULL, NULL);
+          }
+          return _new_response(PACKED_ERR_NONE, rec_inf.item, NULL);
         }
         case 6: {
           response_t resp = _handle_tag_6(rec_inf.current_packing_table,
                                           rec_inf.parent, rec_inf.item);
+          /* Since _NESTED is an error right now we have to omit this,
+            this should be done cleaner in the future
           if (resp.error != PACKED_ERR_NONE) {
             return resp;
-          }
-
+          }*/
           if (resp.error == _NESTED) {
             cbor_item_t* tag_child = cbor_tag_item(rec_inf.item);
             resp = _traverse(_new_rec_info(rec_inf.current_packing_table,
@@ -267,9 +283,8 @@ response_t _traverse(recursion_info_t rec_inf) {
             if (resp.error != PACKED_ERR_NONE) {
               return resp;
             }
-            if (resp.callback.new_packing_table != NULL) {
-              rec_inf.current_packing_table = resp.callback.new_packing_table;
-            }
+            // At this point, our child has been replaced.
+            // HANDLE_CALLBACK(rec_inf, resp.callback);
 
             resp = _handle_tag_6(rec_inf.current_packing_table, rec_inf.parent,
                                  rec_inf.item);
@@ -278,10 +293,11 @@ response_t _traverse(recursion_info_t rec_inf) {
             }
             HANDLE_CALLBACK(rec_inf, resp.callback);
 
-            return resp;
-          } else if (resp.error == PACKED_ERR_NONE) {
-            HANDLE_CALLBACK(rec_inf, resp.callback);
             return _new_response(PACKED_ERR_NONE, rec_inf.item, NULL);
+          }
+          if (resp.error == PACKED_ERR_NONE) {
+            HANDLE_CALLBACK(rec_inf, resp.callback);
+            return _new_response(PACKED_ERR_NONE, NULL, NULL);
           }
         }
         default: {
@@ -294,9 +310,7 @@ response_t _traverse(recursion_info_t rec_inf) {
           if (resp.error != PACKED_ERR_NONE) {
             return resp;
           }
-          if (resp.callback.new_packing_table != NULL) {
-            rec_inf.current_packing_table = resp.callback.new_packing_table;
-          }
+          HANDLE_CALLBACK(rec_inf, resp.callback);
 
           return _new_response(PACKED_ERR_NONE, NULL, NULL);
         }
@@ -352,7 +366,7 @@ unsigned char DATA2[] = {0xD8, 0x71, 0x82, 0x83, 0x63, 0x61, 0x62,
 
 int main(void) {
   struct cbor_load_result res;
-  cbor_item_t* item = cbor_load(DATA, sizeof(DATA), &res);
+  cbor_item_t* item = cbor_load(DATA2, sizeof(DATA2), &res);
   assert(res.error.code == CBOR_ERR_NONE);
   cbor_describe(item, stdout);
   size_t serialized_size = cbor_serialized_size(item);
@@ -372,7 +386,7 @@ int main(void) {
   recursion_info_t rec_inf = _new_rec_info(NULL, item, NULL, 0, false);
   response_t resp = _traverse(rec_inf);
   if (resp.error != PACKED_ERR_NONE) {
-    puts("crashed");
+    printf("\nCRASHED: %s\n", describe_error(resp.error));
   } else {
     HANDLE_CALLBACK(rec_inf, resp.callback);
   }
