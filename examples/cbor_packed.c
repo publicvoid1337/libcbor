@@ -17,13 +17,6 @@ typedef enum {
 typedef struct {
   cbor_item_t* item;
   size_t index;
-  int key_or_value;  // 0 for key, 1 for value
-} cbor_parent_t;
-
-// NEW
-typedef struct {
-  cbor_item_t* item;
-  size_t index;
   bool is_key;
 } parent_t;
 
@@ -96,6 +89,7 @@ char* describe_error(packed_error_t error) {
 response_t _replace_N(parent_t parent, cbor_item_t* item,
                       cbor_item_t* new_item) {
   if (parent.item == NULL) {
+    cbor_decref(&item);
     return _new_response(PACKED_ERR_NONE, new_item, NULL);
   }
   switch (cbor_typeof(parent.item)) {
@@ -162,10 +156,12 @@ response_t _handle_tag_113(parent_t parent, cbor_item_t* item) {
   if (packed_data == NULL) {
     return _new_response(PACKED_ERR_UNEXPECTED_FORMAT, NULL, NULL);
   }
+
   response_t resp = _replace_N(parent, item, packed_data);
   if (resp.error != PACKED_ERR_NONE) {
     return resp;
   }
+
   return _new_response(PACKED_ERR_NONE, resp.callback.new_item, packing_table);
 }
 
@@ -270,11 +266,6 @@ response_t _traverse(recursion_info_t rec_inf) {
         case 6: {
           response_t resp = _handle_tag_6(rec_inf.current_packing_table,
                                           rec_inf.parent, rec_inf.item);
-          /* Since _NESTED is an error right now we have to omit this,
-            this should be done cleaner in the future
-          if (resp.error != PACKED_ERR_NONE) {
-            return resp;
-          }*/
           if (resp.error == _NESTED) {
             cbor_item_t* tag_child = cbor_tag_item(rec_inf.item);
             resp = _traverse(_new_rec_info(rec_inf.current_packing_table,
@@ -299,6 +290,9 @@ response_t _traverse(recursion_info_t rec_inf) {
             HANDLE_CALLBACK(rec_inf, resp.callback);
             return _new_response(PACKED_ERR_NONE, NULL, NULL);
           }
+          if (resp.error != PACKED_ERR_NONE) {
+            return resp;
+          }
         }
         default: {
           /* Tag not specified by packed cbor */
@@ -322,10 +316,6 @@ response_t _traverse(recursion_info_t rec_inf) {
     }
   }
 }
-
-// NEW
-
-// todo: increase max nesting depth
 
 //
 //
@@ -361,28 +351,18 @@ unsigned char DATA[] = {
     0x63, 0x6F, 0x6C, 0x6F, 0x72, 0x63, 0x72, 0x65, 0x64, 0xC6, 0x00, 0xFB,
     0x40, 0x33, 0xF3, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33};
 
-unsigned char DATA2[] = {0xD8, 0x71, 0x82, 0x83, 0x63, 0x61, 0x62,
-                         0x63, 0x00, 0x01, 0xC6, 0xC6, 0xC6, 0x02};
+unsigned char DATA2[] = {0xD8, 0x71, 0x82, 0x83, 0x01, 0x02, 0x63,
+                         0x61, 0x62, 0x63, 0xC6, 0xC6, 0xC6, 0x00};
 
 int main(void) {
   struct cbor_load_result res;
-  cbor_item_t* item = cbor_load(DATA2, sizeof(DATA2), &res);
+  cbor_item_t* item = cbor_load(DATA, sizeof(DATA), &res);
   assert(res.error.code == CBOR_ERR_NONE);
   cbor_describe(item, stdout);
   size_t serialized_size = cbor_serialized_size(item);
   printf("\n\nSerialized size: %zu bytes\n", serialized_size);
 
   puts("\n\n");
-  /*
-  cbor_item_t** root = &item;
-  cbor_parent_t parent = {.item = NULL};
-
-  packed_error_t error = _walk_and_replace(parent, item, NULL, root);
-  if (error != PACKED_ERR_NONE) {
-    fprintf(stderr, "Error occurred while walking and replacing items\n");
-    return 1;
-  }
-  */
   recursion_info_t rec_inf = _new_rec_info(NULL, item, NULL, 0, false);
   response_t resp = _traverse(rec_inf);
   if (resp.error != PACKED_ERR_NONE) {
