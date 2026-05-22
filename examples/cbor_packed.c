@@ -259,9 +259,19 @@ response_t _traverse(recursion_info_t rec_inf) {
               rec_inf.current_packing_table, rec_inf.item, rec_inf.parent.item,
               rec_inf.parent.index, rec_inf.parent.is_key));
           if (resp.error != PACKED_ERR_NONE) {
+            if (rec_inf.current_packing_table != NULL) {
+              cbor_decref(&rec_inf.current_packing_table);
+            }
             return resp;
           }
           HANDLE_CALLBACK(rec_inf, resp.callback);
+
+          if (rec_inf.parent.item == NULL && rec_inf.item != NULL) {
+            cbor_incref(rec_inf.item);
+          }
+          if (rec_inf.current_packing_table != NULL) {
+            cbor_decref(&rec_inf.current_packing_table);
+          }
 
           if (rec_inf.parent.item != NULL) {
             return _new_response(PACKED_ERR_NONE, NULL, NULL);
