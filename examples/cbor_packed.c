@@ -109,12 +109,13 @@ response_t _replace_N(parent_t parent, cbor_item_t* item,
     case CBOR_TYPE_MAP: {
       struct cbor_pair* pairs = cbor_map_handle(parent.item);
       cbor_item_t* old_item;
+      cbor_incref(new_item);
       if (parent.is_key) {
         old_item = pairs[parent.index].key;
-        pairs[parent.index].key = cbor_move(new_item);
+        pairs[parent.index].key = new_item;
       } else {
         old_item = pairs[parent.index].value;
-        pairs[parent.index].value = cbor_move(new_item);
+        pairs[parent.index].value = new_item;
       }
       if (old_item != NULL) {
         cbor_decref(&old_item);
@@ -127,7 +128,8 @@ response_t _replace_N(parent_t parent, cbor_item_t* item,
         cbor_decref(&old_item);
       }
       // MEM: cbor_move does no difference
-      cbor_tag_set_item(parent.item, cbor_move(new_item));
+      cbor_incref(new_item);
+      cbor_tag_set_item(parent.item, new_item);
       break;
     }
     default:
@@ -184,6 +186,7 @@ response_t _handle_tag_6(cbor_item_t* packing_table, parent_t parent,
     }
 
     cbor_item_t* unpacked_item = cbor_array_get(packing_table, index);
+
     response_t resp = _replace_N(parent, item, unpacked_item);
     if (resp.error != PACKED_ERR_NONE) {
       cbor_decref(&unpacked_item);
@@ -192,11 +195,9 @@ response_t _handle_tag_6(cbor_item_t* packing_table, parent_t parent,
     }
     // HANDLE_CALLBACK(rec_inf, resp.callback);
 
-    /*
-    if (parent.item != NULL && cbor_typeof(parent.item) != CBOR_TYPE_MAP) {
+    if (parent.item != NULL) {
       cbor_decref(&unpacked_item);
-    } */
-    cbor_decref(&unpacked_item);
+    }
     cbor_decref(&tag_item);
     return resp;
   }
@@ -266,9 +267,6 @@ response_t _traverse(recursion_info_t rec_inf) {
           }
           HANDLE_CALLBACK(rec_inf, resp.callback);
 
-          if (rec_inf.parent.item == NULL && rec_inf.item != NULL) {
-            cbor_incref(rec_inf.item);
-          }
           if (rec_inf.current_packing_table != NULL) {
             cbor_decref(&rec_inf.current_packing_table);
           }
@@ -370,9 +368,11 @@ unsigned char DATA[] = {
 
 unsigned char DATA2[] = {0xD8, 0x71, 0x82, 0x81, 0x00, 0xC6, 0x00};
 
+unsigned char DATA3[] = {0xD8, 0x71, 0x82, 0x82, 0xC6, 0x01, 0x00, 0xC6, 0x00};
+
 int main(void) {
   struct cbor_load_result res;
-  cbor_item_t* item = cbor_load(DATA2, sizeof(DATA2), &res);
+  cbor_item_t* item = cbor_load(DATA3, sizeof(DATA3), &res);
   assert(res.error.code == CBOR_ERR_NONE);
 
   puts("\n");
