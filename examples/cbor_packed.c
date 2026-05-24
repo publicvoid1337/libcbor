@@ -397,6 +397,20 @@ response_t _traverse(recursion_info_t rec_inf) {
 
             resp = _handle_tag_6(rec_inf.current_packing_table, rec_inf.parent,
                                  rec_inf.item);
+            if (resp.error == _NESTED) {
+              cbor_item_t* unpacked_child = cbor_tag_item(rec_inf.item);
+              if (unpacked_child == NULL) {
+                return _new_response(PACKED_ERR_UNEXPECTED_FORMAT, NULL, NULL);
+              }
+              resp = _replace_N(rec_inf.parent, rec_inf.item, unpacked_child);
+              if (resp.error != PACKED_ERR_NONE) {
+                cbor_decref(&unpacked_child);
+                return resp;
+              }
+              if (rec_inf.parent.item != NULL) {
+                cbor_decref(&unpacked_child);
+              }
+            }
             if (resp.error == _RESOLVE_THEN_REPLACE) {
               resp = _traverse(rec_inf);  // restart process
               return resp;
