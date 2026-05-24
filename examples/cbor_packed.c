@@ -5,13 +5,16 @@
 #include <stdio.h>
 #include "cbor.h"
 
+#define ENABLE_DEBUG 1
+
 typedef enum {
   PACKED_ERR_NONE,
   PACKED_ERR_UNDEFINED_REFERENCE,
   PACKED_ERR_OUT_OF_BOUNDS,
   PACKED_ERR_UNEXPECTED_FORMAT,
   PACKED_ERR_NOT_SUPPORTED,
-  _NESTED
+  _NESTED,
+  _RESOLVE_THEN_REPLACE
 } packed_error_t;
 
 typedef struct {
@@ -83,6 +86,79 @@ char* describe_error(packed_error_t error) {
       return "Nested structure requires additional handling";
     default:
       return "Unknown error";
+  }
+}
+
+char* describe_cbor_type(cbor_item_t* item) {
+  const cbor_type type = cbor_typeof(item);
+  switch (type) {
+    case CBOR_TYPE_UINT:
+      return "UINT";
+    case CBOR_TYPE_NEGINT:
+      return "INT";
+    case CBOR_TYPE_BYTESTRING:
+      return "BYTESTR";
+    case CBOR_TYPE_STRING:
+      return "TEXTSTR";
+    case CBOR_TYPE_ARRAY:
+      return "ARR";
+    case CBOR_TYPE_MAP:
+      return "MAP";
+    case CBOR_TYPE_TAG:
+      return "TAG";
+    case CBOR_TYPE_FLOAT_CTRL:
+      return "FLOAT/CTRL";
+    default:
+      return "CBOR_TYPE_UNKNOWN";
+  }
+}
+
+void print_item_info(cbor_item_t* target, char* identifier) {
+  if (target == NULL) {
+    printf("%s=NULL", identifier);
+    return;
+  }
+  switch (cbor_typeof(target)) {
+    case CBOR_TYPE_ARRAY: {
+      size_t size = cbor_array_size(target);
+      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), size);
+      return;
+    }
+    case CBOR_TYPE_BYTESTRING: {
+      size_t size = cbor_bytestring_length(target);
+      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), size);
+      return;
+    }
+    case CBOR_TYPE_FLOAT_CTRL: {
+      size_t value = cbor_float_get_float(target);
+      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), value);
+      return;
+    }
+    case CBOR_TYPE_MAP: {
+      size_t size = cbor_map_size(target);
+      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), size);
+      return;
+    }
+    case CBOR_TYPE_NEGINT: {
+      int value = cbor_get_int(target);
+      printf("%s=%s(%d)", identifier, describe_cbor_type(target), value);
+      return;
+    }
+    case CBOR_TYPE_UINT: {
+      size_t value = cbor_get_uint64(target);
+      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), value);
+      return;
+    }
+    case CBOR_TYPE_STRING: {
+      size_t size = cbor_string_length(target);
+      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), size);
+      return;
+    }
+    case CBOR_TYPE_TAG: {
+      size_t value = cbor_tag_value(target);
+      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), value);
+      return;
+    }
   }
 }
 
@@ -187,6 +263,14 @@ response_t _handle_tag_6(cbor_item_t* packing_table, parent_t parent,
 
     cbor_item_t* unpacked_item = cbor_array_get(packing_table, index);
 
+    // staging
+    if (cbor_typeof(unpacked_item) == CBOR_TYPE_TAG &&
+        cbor_tag_value(unpacked_item) == 6) {
+      cbor_decref(&tag_item);
+      cbor_decref(&unpacked_item);
+      return _new_response(_RESOLVE_THEN_REPLACE, NULL, NULL);
+    }
+
     response_t resp = _replace_N(parent, item, unpacked_item);
     if (resp.error != PACKED_ERR_NONE) {
       cbor_decref(&unpacked_item);
@@ -207,6 +291,14 @@ response_t _handle_tag_6(cbor_item_t* packing_table, parent_t parent,
 }
 
 response_t _traverse(recursion_info_t rec_inf) {
+#if ENABLE_DEBUG
+  printf("[traverse]  ");
+  print_item_info(rec_inf.item, "curr");
+  printf(" ");
+  print_item_info(rec_inf.parent.item, "parent");
+  printf("\n");
+#endif
+
   switch (cbor_typeof(rec_inf.item)) {
     case CBOR_TYPE_ARRAY: {
       for (size_t i = 0; i < cbor_array_size(rec_inf.item); i++) {
@@ -263,7 +355,7 @@ response_t _traverse(recursion_info_t rec_inf) {
             if (rec_inf.current_packing_table != NULL) {
               cbor_decref(&rec_inf.current_packing_table);
             }
-            return resp;
+            return _new_response(resp.error, rec_inf.item, NULL);
           }
           HANDLE_CALLBACK(rec_inf, resp.callback);
 
@@ -298,6 +390,27 @@ response_t _traverse(recursion_info_t rec_inf) {
             HANDLE_CALLBACK(rec_inf, resp.callback);
 
             return _new_response(PACKED_ERR_NONE, rec_inf.item, NULL);
+          }
+          if (resp.error == _RESOLVE_THEN_REPLACE) {
+            cbor_item_t* tag_child = cbor_tag_item(rec_inf.item);
+            size_t index = cbor_get_uint8(tag_child);
+            cbor_item_t* unpacked_item =
+                cbor_array_get(rec_inf.current_packing_table, index);
+            resp = _traverse(
+                _new_rec_info(rec_inf.current_packing_table, unpacked_item,
+                              rec_inf.current_packing_table, index, false));
+            if (resp.error != PACKED_ERR_NONE) {
+              return resp;
+            }
+            resp = _handle_tag_6(rec_inf.current_packing_table, rec_inf.parent,
+                                 rec_inf.item);
+            if (resp.error != PACKED_ERR_NONE) {
+              return resp;
+            }
+            HANDLE_CALLBACK(rec_inf, resp.callback);
+
+            cbor_decref(&tag_child);
+            cbor_decref(&unpacked_item);
           }
           if (resp.error == PACKED_ERR_NONE) {
             HANDLE_CALLBACK(rec_inf, resp.callback);
@@ -370,9 +483,12 @@ unsigned char DATA2[] = {0xD8, 0x71, 0x82, 0x81, 0x00, 0xC6, 0x00};
 
 unsigned char DATA3[] = {0xD8, 0x71, 0x82, 0x82, 0xC6, 0x01, 0x00, 0xC6, 0x00};
 
+unsigned char DATA4[] = {0xD8, 0x71, 0x82, 0x84, 0xC6, 0xC6, 0x01, 0x02,
+                         0x63, 0x24, 0x24, 0x24, 0x00, 0xC6, 0xC6, 0x03};
+
 int main(void) {
   struct cbor_load_result res;
-  cbor_item_t* item = cbor_load(DATA3, sizeof(DATA3), &res);
+  cbor_item_t* item = cbor_load(DATA4, sizeof(DATA4), &res);
   assert(res.error.code == CBOR_ERR_NONE);
 
   puts("\n");
@@ -382,10 +498,9 @@ int main(void) {
 
   recursion_info_t rec_inf = _new_rec_info(NULL, item, NULL, 0, false);
   response_t resp = _traverse(rec_inf);
+  HANDLE_CALLBACK(rec_inf, resp.callback);
   if (resp.error != PACKED_ERR_NONE) {
     printf("\nCRASHED: %s\n", describe_error(resp.error));
-  } else {
-    HANDLE_CALLBACK(rec_inf, resp.callback);
   }
 
   cbor_describe(rec_inf.item, stdout);
