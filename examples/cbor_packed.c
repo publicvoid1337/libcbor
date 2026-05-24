@@ -7,12 +7,15 @@
 
 #define ENABLE_DEBUG 1
 
+#define MAX_REFERENCE_DEPTH 5
+
 typedef enum {
   PACKED_ERR_NONE,
   PACKED_ERR_UNDEFINED_REFERENCE,
   PACKED_ERR_OUT_OF_BOUNDS,
   PACKED_ERR_UNEXPECTED_FORMAT,
   PACKED_ERR_NOT_SUPPORTED,
+  PACKED_ERR_MAX_REF_DEPTH_EXCEEDED,
   _NESTED,
   _RESOLVE_THEN_REPLACE
 } packed_error_t;
@@ -37,6 +40,7 @@ typedef struct {
   parent_t parent;
   cbor_item_t* item;
   cbor_item_t* current_packing_table;  // should me multiple in the future
+  uint8_t ref_depth;
 } recursion_info_t;
 
 #define HANDLE_CALLBACK(rec_inf, callback)                        \
@@ -60,13 +64,15 @@ response_t _new_response(packed_error_t error, cbor_item_t* cb_new_item,
 recursion_info_t _new_rec_info(cbor_item_t* new_packing_table,
                                cbor_item_t* new_item,
                                cbor_item_t* new_parent_item,
-                               size_t new_parent_idx, bool new_parent_is_key) {
+                               size_t new_parent_idx, bool new_parent_is_key,
+                               uint8_t ref_depth) {
   parent_t parent = {.index = new_parent_idx,
                      .item = new_parent_item,
                      .is_key = new_parent_is_key};
   recursion_info_t rec_inf = {.parent = parent,
                               .current_packing_table = new_packing_table,
-                              .item = new_item};
+                              .item = new_item,
+                              .ref_depth = ref_depth};
   return rec_inf;
 }
 
@@ -82,6 +88,8 @@ char* describe_error(packed_error_t error) {
       return "Unexpected format in packed CBOR data";
     case PACKED_ERR_NOT_SUPPORTED:
       return "Packed CBOR feature not supported";
+    case PACKED_ERR_MAX_REF_DEPTH_EXCEEDED:
+      return "Maximum reference depth was exceeded";
     case _NESTED:
       return "Nested structure requires additional handling";
     default:
@@ -318,8 +326,9 @@ response_t _traverse(recursion_info_t rec_inf) {
     case CBOR_TYPE_ARRAY: {
       for (size_t i = 0; i < cbor_array_size(rec_inf.item); i++) {
         cbor_item_t* child = cbor_array_get(rec_inf.item, i);
-        response_t resp = _traverse(_new_rec_info(
-            rec_inf.current_packing_table, child, rec_inf.item, i, false));
+        response_t resp =
+            _traverse(_new_rec_info(rec_inf.current_packing_table, child,
+                                    rec_inf.item, i, false, rec_inf.ref_depth));
         if (resp.error != PACKED_ERR_NONE) {
           return resp;
         }
@@ -333,8 +342,9 @@ response_t _traverse(recursion_info_t rec_inf) {
       for (size_t i = 0; i < cbor_map_size(rec_inf.item); i++) {
         response_t resp;
         cbor_item_t* key = cbor_incref(pairs[i].key);
-        resp = _traverse(_new_rec_info(rec_inf.current_packing_table, key,
-                                       rec_inf.item, i, true));
+        resp =
+            _traverse(_new_rec_info(rec_inf.current_packing_table, key,
+                                    rec_inf.item, i, true, rec_inf.ref_depth));
         if (resp.error != PACKED_ERR_NONE) {
           cbor_decref(&key);
           return resp;
@@ -343,8 +353,9 @@ response_t _traverse(recursion_info_t rec_inf) {
         cbor_decref(&key);
 
         cbor_item_t* value = cbor_incref(pairs[i].value);
-        resp = _traverse(_new_rec_info(rec_inf.current_packing_table, value,
-                                       rec_inf.item, i, false));
+        resp =
+            _traverse(_new_rec_info(rec_inf.current_packing_table, value,
+                                    rec_inf.item, i, false, rec_inf.ref_depth));
         if (resp.error != PACKED_ERR_NONE) {
           cbor_decref(&value);
           return resp;
@@ -365,7 +376,7 @@ response_t _traverse(recursion_info_t rec_inf) {
 
           resp = _traverse(_new_rec_info(
               rec_inf.current_packing_table, rec_inf.item, rec_inf.parent.item,
-              rec_inf.parent.index, rec_inf.parent.is_key));
+              rec_inf.parent.index, rec_inf.parent.is_key, rec_inf.ref_depth));
           if (resp.error != PACKED_ERR_NONE) {
             if (rec_inf.current_packing_table != NULL) {
               cbor_decref(&rec_inf.current_packing_table);
@@ -389,7 +400,8 @@ response_t _traverse(recursion_info_t rec_inf) {
           if (resp.error == _NESTED) {
             cbor_item_t* tag_child = cbor_tag_item(rec_inf.item);
             resp = _traverse(_new_rec_info(rec_inf.current_packing_table,
-                                           tag_child, rec_inf.item, 0, false));
+                                           tag_child, rec_inf.item, 0, false,
+                                           rec_inf.ref_depth));
             cbor_decref(&tag_child);
             if (resp.error != PACKED_ERR_NONE) {
               return resp;
@@ -423,19 +435,30 @@ response_t _traverse(recursion_info_t rec_inf) {
             return _new_response(PACKED_ERR_NONE, rec_inf.item, NULL);
           }
           if (resp.error == _RESOLVE_THEN_REPLACE) {
+            rec_inf.ref_depth++;
+            if (rec_inf.ref_depth > MAX_REFERENCE_DEPTH) {
+              return _new_response(PACKED_ERR_MAX_REF_DEPTH_EXCEEDED, NULL,
+                                   NULL);
+            }
+
             cbor_item_t* tag_child = cbor_tag_item(rec_inf.item);
             size_t index = cbor_get_uint8(tag_child);
             cbor_item_t* unpacked_item =
                 cbor_array_get(rec_inf.current_packing_table, index);
-            resp = _traverse(
-                _new_rec_info(rec_inf.current_packing_table, unpacked_item,
-                              rec_inf.current_packing_table, index, false));
+            resp = _traverse(_new_rec_info(rec_inf.current_packing_table,
+                                           unpacked_item,
+                                           rec_inf.current_packing_table, index,
+                                           false, rec_inf.ref_depth));
             if (resp.error != PACKED_ERR_NONE) {
+              cbor_decref(&tag_child);
+              cbor_decref(&unpacked_item);
               return resp;
             }
             resp = _handle_tag_6(rec_inf.current_packing_table, rec_inf.parent,
                                  rec_inf.item);
             if (resp.error != PACKED_ERR_NONE) {
+              cbor_decref(&tag_child);
+              cbor_decref(&unpacked_item);
               return resp;
             }
             HANDLE_CALLBACK(rec_inf, resp.callback);
@@ -445,7 +468,6 @@ response_t _traverse(recursion_info_t rec_inf) {
           }
           if (resp.error == PACKED_ERR_NONE) {
             HANDLE_CALLBACK(rec_inf, resp.callback);
-            // staging
             if (rec_inf.parent.item == NULL) {
               return _new_response(PACKED_ERR_NONE, rec_inf.item, NULL);
             }
@@ -456,9 +478,9 @@ response_t _traverse(recursion_info_t rec_inf) {
         default: {
           /* Tag not specified by packed cbor */
           cbor_item_t* tag_child = cbor_tag_item(rec_inf.item);
-          response_t resp =
-              _traverse(_new_rec_info(rec_inf.current_packing_table, tag_child,
-                                      rec_inf.item, 0, false));
+          response_t resp = _traverse(
+              _new_rec_info(rec_inf.current_packing_table, tag_child,
+                            rec_inf.item, 0, false, rec_inf.ref_depth));
           cbor_decref(&tag_child);
           if (resp.error != PACKED_ERR_NONE) {
             return resp;
@@ -520,9 +542,12 @@ unsigned char DATA4[] = {0xD8, 0x71, 0x82, 0x84, 0xC6, 0xC6, 0x01, 0x02,
 unsigned char DATA5[] = {0xD8, 0x71, 0x82, 0x82, 0xC6, 0xC6, 0x01,
                          0x63, 0x24, 0x24, 0x24, 0xC6, 0x00};
 
+unsigned char DATA6[] = {0xD8, 0x71, 0x82, 0x82, 0xC6,
+                         0x01, 0xC6, 0x00, 0xC6, 0x00};
+
 int main(void) {
   struct cbor_load_result res;
-  cbor_item_t* item = cbor_load(DATA5, sizeof(DATA5), &res);
+  cbor_item_t* item = cbor_load(DATA6, sizeof(DATA6), &res);
   assert(res.error.code == CBOR_ERR_NONE);
 
   puts("\n");
@@ -530,7 +555,8 @@ int main(void) {
   size_t serialized_size = cbor_serialized_size(item);
   printf("  ---->  Serialized size: %zu bytes\n\n", serialized_size);
 
-  recursion_info_t rec_inf = _new_rec_info(NULL, item, NULL, 0, false);
+  recursion_info_t rec_inf =
+      _new_rec_info(NULL, item, NULL, 0, false, rec_inf.ref_depth);
   response_t resp = _traverse(rec_inf);
   HANDLE_CALLBACK(rec_inf, resp.callback);
   if (resp.error != PACKED_ERR_NONE) {
