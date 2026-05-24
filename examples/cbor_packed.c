@@ -607,7 +607,7 @@ unsigned char DATA6[] = {0xD8, 0x71, 0x82, 0x82, 0xC6,
 
 int main(void) {
   struct cbor_load_result res;
-  cbor_item_t* item = cbor_load(DATA6, sizeof(DATA6), &res);
+  cbor_item_t* item = cbor_load(DATA, sizeof(DATA), &res);
   assert(res.error.code == CBOR_ERR_NONE);
 
   puts("\n");
