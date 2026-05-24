@@ -216,8 +216,6 @@ response_t _replace_N(parent_t parent, cbor_item_t* item,
       if (old_item != NULL) {
         cbor_decref(&old_item);
       }
-      // MEM: cbor_move does no difference
-      cbor_incref(new_item);
       cbor_tag_set_item(parent.item, new_item);
       break;
     }
