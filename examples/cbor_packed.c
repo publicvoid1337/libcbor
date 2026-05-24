@@ -109,7 +109,7 @@ char* describe_cbor_type(cbor_item_t* item) {
     case CBOR_TYPE_FLOAT_CTRL:
       return "FLOAT/CTRL";
     default:
-      return "CBOR_TYPE_UNKNOWN";
+      return "TYPE_UNKNOWN";
   }
 }
 
@@ -162,8 +162,21 @@ void print_item_info(cbor_item_t* target, char* identifier) {
   }
 }
 
+#define PRINT_DEBUG_MSG(caller, item, parent) \
+  do {                                        \
+    printf("[%-14s]  ", caller);              \
+    print_item_info(item, "curr");            \
+    printf(" ");                              \
+    print_item_info(parent, "parent");        \
+    printf("\n");                             \
+  } while (0)
+
 response_t _replace_N(parent_t parent, cbor_item_t* item,
                       cbor_item_t* new_item) {
+#if ENABLE_DEBUG
+  PRINT_DEBUG_MSG("replace", item, parent.item);
+#endif
+
   if (parent.item == NULL) {
     cbor_decref(&item);
     return _new_response(PACKED_ERR_NONE, new_item, NULL);
@@ -215,6 +228,10 @@ response_t _replace_N(parent_t parent, cbor_item_t* item,
 }
 
 response_t _handle_tag_113(parent_t parent, cbor_item_t* item) {
+#if ENABLE_DEBUG
+  PRINT_DEBUG_MSG("handle_tag_113", item, parent.item);
+#endif
+
   cbor_item_t* arr = cbor_tag_item(item);
   if (arr == NULL) {
     return _new_response(PACKED_ERR_UNEXPECTED_FORMAT, NULL, NULL);
@@ -249,6 +266,10 @@ response_t _handle_tag_113(parent_t parent, cbor_item_t* item) {
 
 response_t _handle_tag_6(cbor_item_t* packing_table, parent_t parent,
                          cbor_item_t* item) {
+#if ENABLE_DEBUG
+  PRINT_DEBUG_MSG("handle_tag_6", item, parent.item);
+#endif
+
   cbor_item_t* tag_item = cbor_tag_item(item);
   if (tag_item == NULL) {
     return _new_response(PACKED_ERR_UNEXPECTED_FORMAT, NULL, NULL);
@@ -292,11 +313,7 @@ response_t _handle_tag_6(cbor_item_t* packing_table, parent_t parent,
 
 response_t _traverse(recursion_info_t rec_inf) {
 #if ENABLE_DEBUG
-  printf("[traverse]  ");
-  print_item_info(rec_inf.item, "curr");
-  printf(" ");
-  print_item_info(rec_inf.parent.item, "parent");
-  printf("\n");
+  PRINT_DEBUG_MSG("traverse", rec_inf.item, rec_inf.parent.item);
 #endif
 
   switch (cbor_typeof(rec_inf.item)) {
@@ -379,11 +396,13 @@ response_t _traverse(recursion_info_t rec_inf) {
             if (resp.error != PACKED_ERR_NONE) {
               return resp;
             }
-            // At this point, our child has been replaced.
-            // HANDLE_CALLBACK(rec_inf, resp.callback);
 
             resp = _handle_tag_6(rec_inf.current_packing_table, rec_inf.parent,
                                  rec_inf.item);
+            if (resp.error == _RESOLVE_THEN_REPLACE) {
+              resp = _traverse(rec_inf);  // restart process
+              return resp;
+            }
             if (resp.error != PACKED_ERR_NONE) {
               return resp;
             }
@@ -503,6 +522,7 @@ int main(void) {
     printf("\nCRASHED: %s\n", describe_error(resp.error));
   }
 
+  puts("");
   cbor_describe(rec_inf.item, stdout);
   serialized_size = cbor_serialized_size(rec_inf.item);
   printf("  ---->  Serialized size: %zu bytes\n", serialized_size);
