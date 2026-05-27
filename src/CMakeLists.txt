@@ -10,6 +10,7 @@ set(SOURCES
     cbor/internal/unicode.c
     cbor/encoding.c
     cbor/serialization.c
+    cbor/packed.c
     cbor/arrays.c
     cbor/common.c
     cbor/floats_ctrls.c
