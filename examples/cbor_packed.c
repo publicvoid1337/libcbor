@@ -45,7 +45,7 @@ unsigned char DATA6[] = {0xD8, 0x71, 0x82, 0x82, 0xC6,
 
 int main(void) {
   struct cbor_load_result res;
-  cbor_item_t* item = cbor_load(DATA6, sizeof(DATA6), &res);
+  cbor_item_t* item = cbor_load(DATA4, sizeof(DATA4), &res);
   assert(res.error.code == CBOR_ERR_NONE);
 
   puts("\n");
@@ -60,12 +60,12 @@ int main(void) {
   HANDLE_CALLBACK(rec_inf, new_item, new_packing_table);
   if (ret != PACKED_ERR_NONE) {
     printf("\nCRASHED: %s\n", describe_error(ret));
+  } else {
+    puts("");
+    cbor_describe(rec_inf.item, stdout);
+    serialized_size = cbor_serialized_size(rec_inf.item);
+    printf("  ---->  Serialized size: %zu bytes\n", serialized_size);
   }
-
-  puts("");
-  cbor_describe(rec_inf.item, stdout);
-  serialized_size = cbor_serialized_size(rec_inf.item);
-  printf("  ---->  Serialized size: %zu bytes\n", serialized_size);
 
   cbor_decref(&rec_inf.item);
   if (rec_inf.num_active > 0) {

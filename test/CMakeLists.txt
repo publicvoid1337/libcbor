@@ -25,6 +25,8 @@ foreach(test_file ${TESTS})
     $<$<BOOL:${SANE_MALLOC}>:SANE_MALLOC>
     $<$<BOOL:${PRINT_FUZZ}>:PRINT_FUZZ>
     $<$<BOOL:${HAVE_EIGHT_BYTE_SIZE_T}>:EIGHT_BYTE_SIZE_T>)
+  # Expose internal symbols to tests
+  target_compile_definitions(${NAME} PRIVATE TESTING)
   add_test(NAME ${NAME} COMMAND ${NAME})
   if(COVERAGE)
     add_dependencies(coverage ${NAME})

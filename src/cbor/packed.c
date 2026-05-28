@@ -1,13 +1,6 @@
 #include "packed.h"
 
-void _set_callback(cbor_item_t** new_item, cbor_item_t** new_packing_table,
-                   cbor_item_t* cb_new_item,
-                   cbor_item_t* cb_new_packing_table) {
-  *new_item = cb_new_item;
-  *new_packing_table = cb_new_packing_table;
-}
-
-const recursion_info_t _new_rec_info(
+recursion_info_t _new_rec_info(
     cbor_item_t* new_packing_tables[MAX_ACTIVE_TABLES], cbor_item_t* new_item,
     cbor_item_t* new_parent_item, size_t new_parent_idx, bool new_parent_is_key,
     uint8_t ref_depth, uint8_t num_active) {
@@ -416,16 +409,22 @@ packed_error_t _handle_tag_113(parent_t parent, cbor_item_t* item,
 
   cbor_item_t* packing_table = cbor_array_get(arr, 0);
   if (packing_table == NULL || cbor_typeof(packing_table) != CBOR_TYPE_ARRAY) {
+    cbor_decref(&arr);
     return PACKED_ERR_UNEXPECTED_FORMAT;
   }
 
   cbor_item_t* packed_data = cbor_array_get(arr, 1);
   if (packed_data == NULL) {
+    cbor_decref(&packing_table);
+    cbor_decref(&arr);
     return PACKED_ERR_UNEXPECTED_FORMAT;
   }
 
   packed_error_t ret = _replace(parent, item, packed_data);
   if (ret != PACKED_ERR_NONE) {
+    cbor_decref(&packed_data);
+    cbor_decref(&packing_table);
+    cbor_decref(&arr);
     return ret;
   }
 
@@ -493,8 +492,6 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item,
   PRINT_DEBUG_MSG("traverse", rec_inf.item, rec_inf.parent.item);
 #endif
 
-  _set_callback(new_item, new_packing_table, NULL, NULL);
-
   switch (cbor_typeof(rec_inf.item)) {
     case CBOR_TYPE_ARRAY: {
       for (size_t i = 0; i < cbor_array_size(rec_inf.item); i++) {
@@ -506,11 +503,8 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item,
                           rec_inf.ref_depth, rec_inf.num_active),
             &child_new_item, &child_new_packing_table);
         if (ret != PACKED_ERR_NONE) {
-          _set_callback(new_item, new_packing_table, child_new_item,
-                        child_new_packing_table);
           return ret;
         }
-        HANDLE_CALLBACK(rec_inf, child_new_item, child_new_packing_table);
         cbor_decref(&child);
       }
       return PACKED_ERR_NONE;
@@ -527,11 +521,8 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item,
                       &child_new_item, &child_new_packing_table);
         if (ret != PACKED_ERR_NONE) {
           cbor_decref(&key);
-          //_set_callback(new_item, new_packing_table, child_new_item,
-          //              child_new_packing_table);
           return ret;
         }
-        // HANDLE_CALLBACK(rec_inf, child_new_item, child_new_packing_table);
         cbor_decref(&key);
 
         child_new_item = NULL;
@@ -543,11 +534,8 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item,
             &child_new_item, &child_new_packing_table);
         if (ret != PACKED_ERR_NONE) {
           cbor_decref(&value);
-          //_set_callback(new_item, new_packing_table, child_new_item,
-          //              child_new_packing_table);
           return ret;
         }
-        // HANDLE_CALLBACK(rec_inf, child_new_item, child_new_packing_table);
         cbor_decref(&value);
       }
       return PACKED_ERR_NONE;
@@ -565,6 +553,9 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item,
             return ret;
           }
           rec_inf.num_active++;
+          if (rec_inf.parent.item == NULL) {
+            *new_item = rec_inf.item;
+          }
 
           cbor_item_t* child_new_item = NULL;
           cbor_item_t* child_new_packing_table = NULL;
@@ -582,15 +573,14 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item,
             //   cbor_decref(&rec_inf.tables[rec_inf.num_active - 1]);
             //   rec_inf.num_active--;
             // }
-            //_set_callback(new_item, new_packing_table, rec_inf.item, NULL);
             return ret;
           }
-          HANDLE_CALLBACK(rec_inf, child_new_item, NULL);
-
+          if (child_new_item != NULL) {
+            rec_inf.item = child_new_item;
+          }
           if (rec_inf.parent.item == NULL) {
             *new_item = rec_inf.item;
           }
-          //_set_callback(new_item, new_packing_table, rec_inf.item, NULL);
           return PACKED_ERR_NONE;
         }
         case 128:
@@ -649,8 +639,6 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item,
                 &child_new_item, &child_new_packing_table);
             cbor_decref(&tag_child);
             if (ret != PACKED_ERR_NONE) {
-              _set_callback(new_item, new_packing_table, child_new_item,
-                            child_new_packing_table);
               return ret;
             }
 
@@ -682,8 +670,6 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item,
             if (tag_new_item != NULL) {
               rec_inf.item = tag_new_item;
             }
-
-            _set_callback(new_item, new_packing_table, rec_inf.item, NULL);
             return PACKED_ERR_NONE;
           }
           if (ret == _RESOLVE_THEN_REPLACE) {
@@ -717,8 +703,6 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item,
             if (ret != PACKED_ERR_NONE) {
               cbor_decref(&tag_child);
               cbor_decref(&unpacked_item);
-              _set_callback(new_item, new_packing_table, child_new_item,
-                            child_new_packing_table);
               return ret;
             }
 
@@ -741,10 +725,9 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item,
               rec_inf.item = tag_new_item;
             }
             if (rec_inf.parent.item == NULL) {
-              _set_callback(new_item, new_packing_table, rec_inf.item, NULL);
+              *new_item = rec_inf.item;
               return PACKED_ERR_NONE;
             }
-            return PACKED_ERR_NONE;
           }
           return ret;
         }
@@ -759,12 +742,8 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item,
               &child_new_item, &child_new_packing_table);
           cbor_decref(&tag_child);
           if (ret != PACKED_ERR_NONE) {
-            _set_callback(new_item, new_packing_table, child_new_item,
-                          child_new_packing_table);
             return ret;
           }
-          HANDLE_CALLBACK(rec_inf, child_new_item, child_new_packing_table);
-
           return PACKED_ERR_NONE;
         }
       }

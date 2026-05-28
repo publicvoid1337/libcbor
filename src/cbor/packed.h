@@ -2,7 +2,7 @@
 #include "cbor.h"
 
 /* DEFINES */
-#define PACKED_ENABLE_DEBUG 1
+#define PACKED_ENABLE_DEBUG 0
 #define MAX_REFERENCE_DEPTH 5
 #define MAX_ACTIVE_TABLES 5
 
@@ -32,24 +32,8 @@ typedef struct {
   uint8_t ref_depth;
 } recursion_info_t;
 
-// POTENTIALLY UNNEEDED
-#define HANDLE_CALLBACK(rec_inf, new_item, new_packing_table) \
-  do {                                                        \
-    if (new_item != NULL) {                                   \
-      rec_inf.item = new_item;                                \
-    }                                                         \
-    if (new_packing_table != NULL) {                          \
-      rec_inf.tables[rec_inf.num_active] = new_packing_table; \
-      rec_inf.num_active++;                                   \
-    }                                                         \
-  } while (0)
-
-void _set_callback(cbor_item_t** new_item, cbor_item_t** new_packing_table,
-                   cbor_item_t* cb_new_item, cbor_item_t* cb_new_packing_table);
-// POTENTIALLY UNNEEDED
-
 /* HELPER FUNCTIONS */
-const recursion_info_t _new_rec_info(
+recursion_info_t _new_rec_info(
     cbor_item_t* new_packing_tables[MAX_ACTIVE_TABLES], cbor_item_t* new_item,
     cbor_item_t* new_parent_item, size_t new_parent_idx, bool new_parent_is_key,
     uint8_t ref_depth, uint8_t num_active);
@@ -67,6 +51,22 @@ void print_item_info(cbor_item_t* target, char* identifier);
     printf(" ");                              \
     print_item_info(parent, "parent");        \
     printf("\n");                             \
+  } while (0)
+
+#define CATCH_DECREF_RETURN(status, ...)                                   \
+  do {                                                                     \
+    if (__VA_ARGS__ == NULL) {                                             \
+      return status;                                                       \
+    }                                                                      \
+    if (status != PACKED_ERR_NONE) {                                       \
+      cbor_item_t* _items[] = {__VA_ARGS__};                               \
+      for (size_t i = 0; i < sizeof(_items) / sizeof(cbor_item_t*); i++) { \
+        if (_items[i] != NULL) {                                           \
+          cbor_decref(&_items[i]);                                         \
+        }                                                                  \
+      }                                                                    \
+      return status;                                                       \
+    }                                                                      \
   } while (0)
 
 /* CBOR FUNCTIONS */
