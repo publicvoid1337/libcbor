@@ -550,20 +550,26 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
         ret = _replace(rec_inf.parent, rec_inf.item, unpacked_item);
         CATCH_DECREF_RETURN(ret, unpacked_item);
         rec_inf.item = unpacked_item;
+        if (rec_inf.parent.item == NULL) {
+          *new_parent = rec_inf.item;
+        }
 
         /* Recursively unpack */
         rec_inf.ref_depth++;
         if (rec_inf.ref_depth > MAX_REFERENCE_DEPTH) {
+          if (rec_inf.parent.item != NULL) {
+            cbor_decref(&unpacked_item);
+          }
           return PACKED_ERR_MAX_REF_DEPTH_EXCEEDED;
         }
-        ret = _traverse(rec_inf, &rec_inf.item);
-        if (ret != PACKED_ERR_NONE) {
-          cbor_decref(&unpacked_item);
-        }
 
+        ret = _traverse(rec_inf, &rec_inf.item);
         if (rec_inf.parent.item == NULL) {
           *new_parent = rec_inf.item;
+        } else {
+          cbor_decref(&unpacked_item);
         }
+        CATCH_DECREF_RETURN(ret);
       }
       return PACKED_ERR_NONE;
     }
@@ -586,6 +592,9 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
            * Note: rec_inf pointers are already updated, since we passed them
            * directly above.*/
           ret = _traverse(rec_inf, &rec_inf.item);
+          if (rec_inf.parent.item == NULL) {
+            *new_parent = rec_inf.item;
+          }
           /* Since _handle_tag_113 gave us ownership of the packing table, we
            * are responisble for feeing it after moving upwards out of its
            * scope */
