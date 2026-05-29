@@ -1,4 +1,8 @@
 #include "packed.h"
+#include <cbor/common.h>
+#include <cbor/data.h>
+#include "floats_ctrls.h"
+#include "ints.h"
 
 recursion_info_t _new_rec_info(
     cbor_item_t* new_packing_tables[MAX_ACTIVE_TABLES], cbor_item_t* new_item,
@@ -81,8 +85,14 @@ void print_item_info(cbor_item_t* target, char* identifier) {
       return;
     }
     case CBOR_TYPE_FLOAT_CTRL: {
-      size_t value = cbor_float_get_float(target);
-      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), value);
+      if (cbor_float_ctrl_is_ctrl(target)) {
+        int value = cbor_ctrl_value(target);
+        printf("%s=%s(%d)", identifier, "CTRL", value);
+        return;
+      } else {
+        float value = cbor_float_get_float(target);
+        printf("%s=%s(%f)", identifier, "FLOAT", value);
+      }
       return;
     }
     case CBOR_TYPE_MAP: {
@@ -96,7 +106,7 @@ void print_item_info(cbor_item_t* target, char* identifier) {
       return;
     }
     case CBOR_TYPE_UINT: {
-      size_t value = cbor_get_uint64(target);
+      int value = cbor_get_int(target);
       printf("%s=%s(%ld)", identifier, describe_cbor_type(target), value);
       return;
     }
@@ -346,7 +356,6 @@ packed_error_t _replace(parent_t parent, cbor_item_t* old_item,
 #if PACKED_ENABLE_DEBUG
   PRINT_DEBUG_MSG("replace", old_item, parent.item);
 #endif
-
   if (new_item == NULL) {
     return PACKED_ERR_UNEXPECTED_FORMAT;
   }
@@ -525,6 +534,39 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
       }
       return PACKED_ERR_NONE;
     }
+    case CBOR_TYPE_FLOAT_CTRL: {
+      /* Simple value in range 0-15 => Shared item refrence */
+      if (cbor_float_ctrl_is_ctrl(rec_inf.item) &&
+          (cbor_ctrl_value(rec_inf.item) >= 0 &&
+           cbor_ctrl_value(rec_inf.item) <= 15)) {
+        size_t index = cbor_ctrl_value(rec_inf.item);
+
+        cbor_item_t* unpacked_item = NULL;
+        packed_error_t ret =
+            _packing_table_get(rec_inf.tables, rec_inf.num_active, index,
+                               &unpacked_item, NULL, NULL, NULL);
+        CATCH_DECREF_RETURN(ret);
+
+        ret = _replace(rec_inf.parent, rec_inf.item, unpacked_item);
+        CATCH_DECREF_RETURN(ret, unpacked_item);
+        rec_inf.item = unpacked_item;
+
+        /* Recursively unpack */
+        rec_inf.ref_depth++;
+        if (rec_inf.ref_depth > MAX_REFERENCE_DEPTH) {
+          return PACKED_ERR_MAX_REF_DEPTH_EXCEEDED;
+        }
+        ret = _traverse(rec_inf, &rec_inf.item);
+        if (ret != PACKED_ERR_NONE) {
+          cbor_decref(&unpacked_item);
+        }
+
+        if (rec_inf.parent.item == NULL) {
+          *new_parent = rec_inf.item;
+        }
+      }
+      return PACKED_ERR_NONE;
+    }
     case CBOR_TYPE_TAG: {
       switch (cbor_tag_value(rec_inf.item)) {
         /* Basic Packed CBOR (shared table) */
@@ -548,6 +590,7 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
            * are responisble for feeing it after moving upwards out of its
            * scope */
           cbor_decref(&rec_inf.tables[rec_inf.num_active - 1]);
+
           rec_inf.num_active--;
           CATCH_DECREF_RETURN(ret);
 
@@ -676,7 +719,7 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
       }
     }
     default: {
-      /* normal leaf node */
+      /* Normal leaf node */
       return PACKED_ERR_NONE;
     }
   }
