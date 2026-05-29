@@ -47,6 +47,9 @@ typedef void (*cbor_double_callback)(void*, double);
 /** Callback prototype */
 typedef void (*cbor_bool_callback)(void*, bool);
 
+/** Callback prototype */
+typedef void (*cbor_shared_ref_callback)(void*, uint64_t);
+
 /** Callback bundle -- passed to the decoder */
 struct cbor_callbacks {
   /** Unsigned int */
@@ -102,6 +105,8 @@ struct cbor_callbacks {
   cbor_simple_callback null;
   /** Bool */
   cbor_bool_callback boolean;
+  /** Shared item reference (packed cbor) */
+  cbor_shared_ref_callback shared_ref;
 
   /** Indefinite item break */
   cbor_simple_callback indef_break;
@@ -175,6 +180,9 @@ CBOR_EXPORT void cbor_null_undefined_callback(void*);
 
 /** Dummy callback implementation - does nothing */
 CBOR_EXPORT void cbor_null_boolean_callback(void*, bool);
+
+/** Dummy callback implementation - does nothing */
+CBOR_EXPORT void cbor_null_shared_ref_callback(void*, uint64_t);
 
 /** Dummy callback implementation - does nothing */
 CBOR_EXPORT void cbor_null_indef_break_callback(void*);

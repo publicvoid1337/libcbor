@@ -428,3 +428,10 @@ void cbor_builder_tag_callback(void* context, uint64_t value) {
   CHECK_RES(ctx, res);
   PUSH_CTX_STACK(ctx, res, 1);
 }
+
+void cbor_builder_shared_ref_callback(void* context, uint64_t value) {
+  struct _cbor_decoder_context* ctx = context;
+  cbor_item_t* res = cbor_build_ctrl(value);
+  CHECK_RES(ctx, res);
+  _cbor_builder_append(res, ctx);
+}

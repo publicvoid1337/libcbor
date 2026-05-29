@@ -43,9 +43,11 @@ unsigned char DATA5[] = {0xD8, 0x71, 0x82, 0x82, 0xC6, 0xC6, 0x01,
 unsigned char DATA6[] = {0xD8, 0x71, 0x82, 0x82, 0xC6,
                          0x01, 0xC6, 0x00, 0xC6, 0x00};
 
+unsigned char DATA7[] = {0xE0};
+
 int main(void) {
   struct cbor_load_result res;
-  cbor_item_t* item = cbor_load(DATA, sizeof(DATA), &res);
+  cbor_item_t* item = cbor_load(DATA7, sizeof(DATA7), &res);
   assert(res.error.code == CBOR_ERR_NONE);
 
   puts("\n");
