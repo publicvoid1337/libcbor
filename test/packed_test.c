@@ -58,14 +58,10 @@ static void assert_traverse_result(const unsigned char* data, size_t len,
 
   recursion_info_t rec_inf = _new_rec_info(NULL, item, NULL, 0, false, 0, 0);
   cbor_item_t* new_item = NULL;
-  cbor_item_t* new_packing_table = NULL;
-  packed_error_t ret = _traverse(rec_inf, &new_item, &new_packing_table);
+  packed_error_t ret = _traverse(rec_inf, &new_item);
 
   if (new_item != NULL) {
     rec_inf.item = new_item;
-  }
-  if (new_packing_table != NULL) {
-    rec_inf.tables[rec_inf.num_active++] = new_packing_table;
   }
 
   assert_int_equal(ret, expected_err);

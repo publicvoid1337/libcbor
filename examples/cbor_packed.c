@@ -45,7 +45,7 @@ unsigned char DATA6[] = {0xD8, 0x71, 0x82, 0x82, 0xC6,
 
 int main(void) {
   struct cbor_load_result res;
-  cbor_item_t* item = cbor_load(DATA4, sizeof(DATA4), &res);
+  cbor_item_t* item = cbor_load(DATA, sizeof(DATA), &res);
   assert(res.error.code == CBOR_ERR_NONE);
 
   puts("\n");
@@ -55,9 +55,10 @@ int main(void) {
 
   recursion_info_t rec_inf = _new_rec_info(NULL, item, NULL, 0, false, 0, 0);
   cbor_item_t* new_item = NULL;
-  cbor_item_t* new_packing_table = NULL;
-  packed_error_t ret = _traverse(rec_inf, &new_item, &new_packing_table);
-  HANDLE_CALLBACK(rec_inf, new_item, new_packing_table);
+  packed_error_t ret = _traverse(rec_inf, &new_item);
+  if (new_item != NULL) {
+    rec_inf.item = new_item;
+  }
   if (ret != PACKED_ERR_NONE) {
     printf("\nCRASHED: %s\n", describe_error(ret));
   } else {

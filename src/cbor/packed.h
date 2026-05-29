@@ -53,21 +53,32 @@ void print_item_info(cbor_item_t* target, char* identifier);
     printf("\n");                             \
   } while (0)
 
-#define CATCH_DECREF_RETURN(status, ...)                                   \
+#define CATCH_DECREF_RETURN_0(status)  \
+  do {                                 \
+    if ((status) != PACKED_ERR_NONE) { \
+      return (status);                 \
+    }                                  \
+  } while (0)
+
+#define CATCH_DECREF_RETURN_1(status, ...)                                 \
   do {                                                                     \
-    if (__VA_ARGS__ == NULL) {                                             \
-      return status;                                                       \
-    }                                                                      \
-    if (status != PACKED_ERR_NONE) {                                       \
+    packed_error_t _packed_status = (status);                              \
+    if (_packed_status != PACKED_ERR_NONE) {                               \
       cbor_item_t* _items[] = {__VA_ARGS__};                               \
-      for (size_t i = 0; i < sizeof(_items) / sizeof(cbor_item_t*); i++) { \
-        if (_items[i] != NULL) {                                           \
-          cbor_decref(&_items[i]);                                         \
+      for (size_t _i = 0; _i < sizeof(_items) / sizeof(_items[0]); _i++) { \
+        if (_items[_i] != NULL) {                                          \
+          cbor_decref(&_items[_i]);                                        \
         }                                                                  \
       }                                                                    \
-      return status;                                                       \
+      return _packed_status;                                               \
     }                                                                      \
   } while (0)
+
+#define _CATCH_DECREF_RETURN_GET_MACRO(_1, _2, NAME, ...) NAME
+
+#define CATCH_DECREF_RETURN(...)                                     \
+  _CATCH_DECREF_RETURN_GET_MACRO(__VA_ARGS__, CATCH_DECREF_RETURN_1, \
+                                 CATCH_DECREF_RETURN_0)(__VA_ARGS__)
 
 /* CBOR FUNCTIONS */
 packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
@@ -102,5 +113,4 @@ packed_error_t _handle_tag_113(parent_t parent, cbor_item_t* item,
                                cbor_item_t** new_root, cbor_item_t** new_table);
 
 /* MAIN FUNCTION */
-packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item,
-                         cbor_item_t** new_packing_table);
+packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item);
