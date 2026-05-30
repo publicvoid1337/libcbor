@@ -326,13 +326,34 @@ packed_error_t _record(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out) {
   return PACKED_ERR_NONE;
 }
 
-packed_error_t _splice(cbor_item_t* arg, parent_t parent) {
-  if (cbor_typeof(arg) != CBOR_TYPE_ARRAY ||
-      cbor_typeof(parent.item) != CBOR_TYPE_ARRAY) {
-    return PACKED_ERR_UNEXPECTED_FORMAT;
+packed_error_t _splice(cbor_item_t* arg, parent_t parent, cbor_item_t** out) {
+  cbor_item_t* res = cbor_new_indefinite_array();
+  for (size_t i = 0; i < cbor_array_size(arg); i++) {
+    cbor_item_t* child = cbor_array_get(arg, i);
+    if (cbor_typeof(child) == CBOR_TYPE_TAG && cbor_tag_value(child) == 1115) {
+      cbor_item_t* tag_arg = cbor_tag_item(child);
+      if (tag_arg == NULL || cbor_typeof(tag_arg) != CBOR_TYPE_ARRAY) {
+        if (tag_arg != NULL) {
+          cbor_decref(&tag_arg);
+        }
+        cbor_decref(&child);
+        cbor_decref(&res);
+        return PACKED_ERR_UNEXPECTED_FORMAT;
+      }
+      for (size_t j = 0; j < cbor_array_size(tag_arg); j++) {
+        cbor_item_t* spliced_child = cbor_array_get(tag_arg, j);
+        assert(cbor_array_push(res, spliced_child));
+        cbor_decref(&spliced_child);
+      }
+      cbor_decref(&tag_arg);
+    } else {
+      assert(cbor_array_push(res, child));
+    }
+    cbor_decref(&child);
   }
+
+  *out = res;
   return PACKED_ERR_NONE;
-  // cbor_array_replace(cbor_item_t * item, size_t index, cbor_item_t* value)
 }
 
 // bumps refcount of "out_shared_item" by 1
@@ -428,9 +449,9 @@ packed_error_t _replace(parent_t parent, cbor_item_t* old_item,
   return PACKED_ERR_NONE;
 }
 
-packed_error_t _handle_tag_113(parent_t parent, cbor_item_t* item,
-                               cbor_item_t** new_root,
-                               cbor_item_t** new_table) {
+packed_error_t _consume_table_113(parent_t parent, cbor_item_t* item,
+                                  cbor_item_t** new_root,
+                                  cbor_item_t** new_table) {
 #if PACKED_ENABLE_DEBUG
   PRINT_DEBUG_MSG("handle_tag_113", item, parent.item);
 #endif
@@ -532,32 +553,17 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
         cbor_decref(&child);
         /* Splicing Integration Tag Callback (could probably be done nicer)*/
         if (ret == _TAG_1115) {
-          /* Child is now mutated since a reference was replaced */
           splice_afterwards = true;
         } else {
           CATCH_DECREF_RETURN(ret);
         }
       }
       if (splice_afterwards) {
-        cbor_item_t* res = cbor_new_indefinite_array();
-        for (size_t i = 0; i < cbor_array_size(rec_inf.item); i++) {
-          cbor_item_t* child = cbor_array_get(rec_inf.item, i);
-          if (cbor_typeof(child) == CBOR_TYPE_TAG &&
-              cbor_tag_value(child) == 1115) {
-            cbor_item_t* tag_arg = cbor_tag_item(child);
-            if (cbor_typeof(tag_arg) != CBOR_TYPE_ARRAY) {
-              return PACKED_ERR_UNEXPECTED_FORMAT;
-            }
-            for (size_t j = 0; j < cbor_array_size(tag_arg); j++) {
-              cbor_item_t* child = cbor_array_get(tag_arg, j);
-              assert(cbor_array_push(res, child));
-            }
-          } else {
-            assert(cbor_array_push(res, child));
-          }
-        }
+        cbor_item_t* res = NULL;
+        packed_error_t ret = _splice(rec_inf.item, rec_inf.parent, &res);
+        CATCH_DECREF_RETURN(ret, res);
 
-        packed_error_t ret = _replace(rec_inf.parent, rec_inf.item, res);
+        ret = _replace(rec_inf.parent, rec_inf.item, res);
         CATCH_DECREF_RETURN(ret, res);
         rec_inf.item = res;
         if (rec_inf.parent.item == NULL) {
@@ -605,9 +611,14 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
         }
 
         /* Check integration tags */
-        if (cbor_typeof(rec_inf.item) == CBOR_TYPE_TAG &&
-            cbor_tag_value(rec_inf.item) == 1115) {
-          return _TAG_1115;
+        if (cbor_typeof(rec_inf.item) == CBOR_TYPE_TAG) {
+          switch (cbor_tag_value(rec_inf.item)) {
+            case 1115: {
+              /* Our parent must be an array */
+              cbor_decref(&unpacked_item);
+              return _TAG_1115;
+            }
+          }
         }
 
         /* Recursively unpack */
@@ -635,8 +646,8 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
           /* Consume the table definition, recieving the packing table and the
            * packed data */
           packed_error_t ret =
-              _handle_tag_113(rec_inf.parent, rec_inf.item, &rec_inf.item,
-                              &rec_inf.tables[rec_inf.num_active]);
+              _consume_table_113(rec_inf.parent, rec_inf.item, &rec_inf.item,
+                                 &rec_inf.tables[rec_inf.num_active]);
           CATCH_DECREF_RETURN(ret);
 
           rec_inf.num_active++;

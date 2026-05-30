@@ -111,8 +111,9 @@ packed_error_t _handle_tag_6(cbor_item_t* packing_tables[MAX_ACTIVE_TABLES],
                              uint8_t num_active, parent_t parent,
                              cbor_item_t* item, cbor_item_t** new_item);
 
-packed_error_t _handle_tag_113(parent_t parent, cbor_item_t* item,
-                               cbor_item_t** new_root, cbor_item_t** new_table);
+packed_error_t _consume_table_113(parent_t parent, cbor_item_t* item,
+                                  cbor_item_t** new_root,
+                                  cbor_item_t** new_table);
 
 /* MAIN FUNCTION */
 packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item);
