@@ -205,7 +205,7 @@ static void test_join_empty_array_to_string(void** _state _CBOR_UNUSED) {
   assert_non_null(rhs);
 
   cbor_item_t* out = NULL;
-  packed_error_t err = _join(lhs, rhs, &out, false);
+  packed_error_t err = _join(lhs, rhs, &out);
   assert_int_equal(err, PACKED_ERR_NONE);
   assert_non_null(out);
   assert_true(cbor_isa_string(out));

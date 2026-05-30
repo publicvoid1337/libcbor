@@ -265,18 +265,23 @@ packed_error_t _join(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out) {
     return PACKED_ERR_NONE;
   }
 
-  cbor_item_t* res = rhs_handle[0];
+  cbor_item_t* res = cbor_incref(rhs_handle[0]);
   cbor_type out_type = cbor_typeof(res);
   for (size_t i = 1; i < rhs_length; i++) {
     packed_error_t err;
     if (i % 2 == 1) {
-      err = _concatenate(res, lhs, &res, out_type);
+      cbor_item_t* next = NULL;
+      err = _concatenate(res, lhs, &next, out_type);
+      cbor_decref(&res);
       CATCH_DECREF_RETURN(err);
+      res = next;
     }
-    err = _concatenate(res, rhs_handle[i], &res, out_type);
+    cbor_item_t* next = NULL;
+    err = _concatenate(res, rhs_handle[i], &next, out_type);
+    cbor_decref(&res);
     CATCH_DECREF_RETURN(err);
+    res = next;
   }
-  cbor_decref(&res);
 
   *out = res;
   return PACKED_ERR_NONE;
@@ -617,6 +622,7 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
           /* Determine lhs and rhs as well as function to be applied */
           cbor_item_t* lhs = is_straight ? argument : rump;
           cbor_item_t* rhs = is_straight ? rump : argument;
+          cbor_item_t* function_argument = NULL;
 
           /* TODO: Implement handling of function tags as described in the
            * packed cbor specification */
@@ -624,12 +630,13 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
           if (cbor_typeof(lhs) == CBOR_TYPE_TAG) {
             function_id = cbor_tag_value(lhs);
             // we do not modify the function tag itself
-            lhs = cbor_tag_item(lhs);
-            if (lhs == NULL) {
+            function_argument = cbor_tag_item(lhs);
+            if (function_argument == NULL) {
               cbor_decref(&argument);
               cbor_decref(&rump);
               return PACKED_ERR_UNEXPECTED_FORMAT;
             }
+            lhs = function_argument;
           }
 
           /* Unpack both recursively */
@@ -637,40 +644,45 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
               _new_rec_info(rec_inf.tables, rump, rec_inf.item, 0, false,
                             rec_inf.ref_depth, rec_inf.num_active),
               &rump);
-          CATCH_DECREF_RETURN_1(ret, argument, rump);
+          CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument);
 
           ret = _traverse(
               _new_rec_info(rec_inf.tables, argument, rec_inf.item, 0, false,
                             rec_inf.ref_depth, rec_inf.num_active),
               &argument);
-          CATCH_DECREF_RETURN_1(ret, argument, rump);
+          CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument);
 
           /* Apply function */
-          cbor_item_t* res;
+          cbor_item_t* res = NULL;
           switch (function_id) {
             case 0: {
               ret = _concatenate(lhs, rhs, &res, cbor_typeof(rump));
-              CATCH_DECREF_RETURN_1(ret, argument, rump, res);
+              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
+                                    res);
               break;
             }
             case 106: {
               ret = _join(lhs, rhs, &res);
-              CATCH_DECREF_RETURN_1(ret, argument, rump, res);
+              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
+                                    res);
               break;
             }
           }
 
           /* Replace reference with result of function application */
           ret = _replace(rec_inf.parent, rec_inf.item, res);
-          CATCH_DECREF_RETURN_1(ret, argument, rump, res);
+          CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument, res);
           rec_inf.item = res;
           if (rec_inf.parent.item == NULL) {
             *new_parent = rec_inf.item;
           }
 
           cbor_decref(&rec_inf.item);
-          cbor_decref(&lhs);
-          cbor_decref(&rhs);
+          cbor_decref(&argument);
+          cbor_decref(&rump);
+          if (function_argument != NULL) {
+            cbor_decref(&function_argument);
+          }
           return PACKED_ERR_NONE;
         }
         case 6: {
