@@ -186,7 +186,7 @@ static void test_concatenate_text_and_bytestring(void** _state _CBOR_UNUSED) {
   assert_non_null(rhs);
 
   cbor_item_t* out = NULL;
-  packed_error_t err = _concatenate(lhs, rhs, &out);
+  packed_error_t err = _concatenate(lhs, rhs, &out, CBOR_TYPE_BYTESTRING);
   assert_int_equal(err, PACKED_ERR_NONE);
   assert_non_null(out);
   assert_true(cbor_isa_bytestring(out));

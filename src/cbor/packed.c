@@ -3,6 +3,7 @@
 #include <cbor/data.h>
 #include "floats_ctrls.h"
 #include "ints.h"
+#include "strings.h"
 
 recursion_info_t _new_rec_info(
     cbor_item_t* new_packing_tables[MAX_ACTIVE_TABLES], cbor_item_t* new_item,
@@ -124,13 +125,14 @@ void print_item_info(cbor_item_t* target, char* identifier) {
 }
 
 packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
-                            cbor_item_t** out) {
+                            cbor_item_t** out, cbor_type string_out_type) {
   if (cbor_typeof(lhs) == CBOR_TYPE_ARRAY &&
       cbor_typeof(rhs) == CBOR_TYPE_ARRAY) {
     size_t lhs_size = cbor_array_size(lhs);
     size_t rhs_size = cbor_array_size(rhs);
     cbor_item_t* new_arr = cbor_new_definite_array(lhs_size + rhs_size);
     if (new_arr == NULL) {
+      // TODO: better semantics
       return PACKED_ERR_NOT_SUPPORTED;
     }
 
@@ -143,6 +145,7 @@ packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
       if (!cbor_array_push(new_arr, cbor_move(item))) {
         cbor_decref(&item);
         cbor_decref(&new_arr);
+        // TODO: better semantics
         return PACKED_ERR_NOT_SUPPORTED;
       }
       i++;
@@ -160,13 +163,12 @@ packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
       if (cbor_is_undef(rhs_handle[i].value)) {
         continue;
       }
-      cbor_map_add(res, rhs_handle[i]);
+      assert(cbor_map_add(res, rhs_handle[i]));
     }
 
     struct cbor_pair* lhs_handle = cbor_map_handle(lhs);
     size_t lhs_size = cbor_map_size(lhs);
     for (size_t j = 0; j < lhs_size; j++) {
-      //
       bool skip = false;
       for (size_t i = 0; i < rhs_size; i++) {
         if (cbor_structurally_equal(lhs_handle[j].key, rhs_handle[i].key)) {
@@ -175,7 +177,7 @@ packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
         }
       }
       if (skip) continue;
-      cbor_map_add(res, lhs_handle[j]);
+      assert(cbor_map_add(res, lhs_handle[j]));
     }
 
     *out = res;
@@ -184,66 +186,30 @@ packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
               cbor_typeof(lhs) == CBOR_TYPE_BYTESTRING) &&
              (cbor_typeof(rhs) == CBOR_TYPE_STRING ||
               cbor_typeof(rhs) == CBOR_TYPE_BYTESTRING)) {
-    // lhs = rump, rhs = argument
-    cbor_data rhs_handle;
-    size_t rhs_length;
-    if (cbor_typeof(rhs) == CBOR_TYPE_BYTESTRING) {
-      /* Only supporst definite length strings right now */
-      rhs_handle = cbor_bytestring_handle(rhs);
-      rhs_length = cbor_bytestring_length(rhs);
-    } else {
-      /* Only supporst definite length strings right now */
-      rhs_handle = cbor_string_handle(rhs);
-      rhs_length = cbor_string_length(rhs);
-    }
+    cbor_mutable_data lhs_handle = cbor_typeof(lhs) == CBOR_TYPE_STRING
+                                       ? cbor_string_handle(lhs)
+                                       : cbor_bytestring_handle(lhs);
+    size_t lhs_size = cbor_typeof(lhs) == CBOR_TYPE_STRING
+                          ? cbor_string_length(lhs)
+                          : cbor_bytestring_length(lhs);
+    cbor_mutable_data rhs_handle = cbor_typeof(rhs) == CBOR_TYPE_STRING
+                                       ? cbor_string_handle(rhs)
+                                       : cbor_bytestring_handle(rhs);
+    size_t rhs_size = cbor_typeof(rhs) == CBOR_TYPE_STRING
+                          ? cbor_string_length(rhs)
+                          : cbor_bytestring_length(rhs);
 
     cbor_item_t* res;
-    if (cbor_typeof(lhs) == CBOR_TYPE_BYTESTRING) {
-      res = cbor_new_indefinite_bytestring();
-      cbor_item_t* lhs_handle = cbor_build_bytestring(
-          cbor_bytestring_handle(lhs), cbor_bytestring_length(lhs));
-      if (!cbor_bytestring_add_chunk(res, lhs_handle)) {
-        cbor_decref(&lhs_handle);
-        cbor_decref(&res);
-        return PACKED_ERR_UNEXPECTED_FORMAT;
-      }
-      cbor_decref(&lhs_handle);
+    unsigned char res_bytes[lhs_size + rhs_size];
+    memcpy(res_bytes, lhs_handle, lhs_size);
+    memcpy(res_bytes + lhs_size, rhs_handle, rhs_size);
 
-      if (!cbor_bytestring_add_chunk(
-              res, cbor_move(cbor_build_bytestring(rhs_handle, rhs_length)))) {
-        cbor_decref(&lhs_handle);
-        cbor_decref(&res);
-        return PACKED_ERR_UNEXPECTED_FORMAT;
-      }
-      *out = res;
-      return PACKED_ERR_NONE;
+    if (string_out_type == CBOR_TYPE_STRING) {
+      *out = cbor_build_stringn(res_bytes, lhs_size + rhs_size);
     } else {
-      res = cbor_new_indefinite_string();
-      cbor_item_t* lhs_str = cbor_build_stringn(
-          (const char*)cbor_string_handle(lhs), cbor_string_length(lhs));
-      if (!cbor_string_add_chunk(res, lhs_str)) {
-        cbor_decref(&lhs_str);
-        cbor_decref(&res);
-        return PACKED_ERR_UNEXPECTED_FORMAT;
-      }
-      cbor_decref(&lhs_str);
-
-      cbor_item_t* rhs_str =
-          cbor_build_stringn((const char*)rhs_handle, rhs_length);
-      // NOT VALID UTF-8 CHECK, maybe wrong
-      if (cbor_string_codepoint_count(rhs_str) == 0) {
-        cbor_decref(&rhs_str);
-        cbor_decref(&res);
-        return PACKED_ERR_UNEXPECTED_FORMAT;
-      }
-
-      if (!cbor_string_add_chunk(res, cbor_move(rhs_str))) {
-        cbor_decref(&res);
-        return PACKED_ERR_UNEXPECTED_FORMAT;
-      }
-      *out = res;
-      return PACKED_ERR_NONE;
+      *out = cbor_build_bytestring(res_bytes, lhs_size + rhs_size);
     }
+    return PACKED_ERR_NONE;
   } else if (((cbor_typeof(lhs) == CBOR_TYPE_STRING ||
                cbor_typeof(lhs) == CBOR_TYPE_STRING) &&
               cbor_typeof(rhs) == CBOR_TYPE_ARRAY) ||
@@ -273,13 +239,16 @@ packed_error_t _join(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out,
 
   size_t rhs_length = cbor_array_size(rhs);
   cbor_item_t** rhs_handle = cbor_array_handle(rhs);
+  cbor_type out_type;
   if (rhs_length == 0) {
     switch (cbor_typeof(lhs)) {
       case CBOR_TYPE_STRING:
         *out = cbor_new_indefinite_string();
+        out_type = CBOR_TYPE_STRING;
         return PACKED_ERR_NONE;
       case CBOR_TYPE_BYTESTRING:
         *out = cbor_new_indefinite_bytestring();
+        out_type = CBOR_TYPE_BYTESTRING;
         return PACKED_ERR_NONE;
       case CBOR_TYPE_ARRAY:
         *out = cbor_new_indefinite_array();
@@ -300,12 +269,12 @@ packed_error_t _join(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out,
   for (size_t i = 1; i < rhs_length; i++) {
     packed_error_t err;
     if (i % 2 == 1) {
-      err = _concatenate(res, lhs, &res);
+      err = _concatenate(res, lhs, &res, out_type);
       if (err != PACKED_ERR_NONE) {
         return err;
       }
     }
-    err = _concatenate(res, rhs_handle[i], &res);
+    err = _concatenate(res, rhs_handle[i], &res, out_type);
     if (err != PACKED_ERR_NONE) {
       return err;
     }
@@ -615,38 +584,74 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
         case 132:
         case 133:
         case 134:
-        case 135: {
+        case 135:
+        case 136:
+        case 137:
+        case 138:
+        case 139:
+        case 140:
+        case 141:
+        case 142:
+        case 143: {
           /* Get rump and argument */
-          size_t idx = cbor_tag_value(rec_inf.item) - 128;
+          size_t idx;
+          bool is_straight;
+          if (cbor_tag_value(rec_inf.item) < 136) {
+            idx = cbor_tag_value(rec_inf.item) - 128;
+            is_straight = true;
+          } else {
+            idx = cbor_tag_value(rec_inf.item) - 136;
+            is_straight = false;
+          }
+
           cbor_item_t* argument = NULL;
           packed_error_t ret =
               _packing_table_get(rec_inf.tables, rec_inf.num_active, idx,
                                  &argument, NULL, NULL, NULL);
-          if (ret != PACKED_ERR_NONE) {
-            return ret;
-          }
+          CATCH_DECREF_RETURN(ret, argument);
           cbor_item_t* rump = cbor_tag_item(rec_inf.item);
           if (rump == NULL) {
+            cbor_decref(&argument);
             return PACKED_ERR_UNEXPECTED_FORMAT;
           }
+
+          /* Determine lhs and rhs as well as function to be applied */
+          cbor_item_t* lhs = is_straight ? argument : rump;
+          cbor_item_t* rhs = is_straight ? rump : argument;
+
+          /* TODO: Implement handling of function tags as described in the
+           * packed cbor specification */
 
           /* Unpack both recursively */
           ret = _traverse(
               _new_rec_info(rec_inf.tables, rump, rec_inf.item, 0, false,
                             rec_inf.ref_depth, rec_inf.num_active),
               &rump);
-          if (ret != PACKED_ERR_NONE) {
-            cbor_decref(&rump);
-            return ret;
-          }
+          CATCH_DECREF_RETURN_1(ret, argument, rump);
+
           ret = _traverse(
               _new_rec_info(rec_inf.tables, argument, rec_inf.item, 0, false,
                             rec_inf.ref_depth, rec_inf.num_active),
               &argument);
-          if (ret != PACKED_ERR_NONE) {
-            cbor_decref(&argument);
-            return ret;
+          CATCH_DECREF_RETURN_1(ret, argument, rump);
+
+          /* Apply function */
+          cbor_item_t* res;
+          ret = _concatenate(lhs, rhs, &res, cbor_typeof(rump));
+          CATCH_DECREF_RETURN_1(ret, argument, rump, res);
+
+          /* Replace reference with result of function application */
+          ret = _replace(rec_inf.parent, rec_inf.item, res);
+          CATCH_DECREF_RETURN_1(ret, argument, rump, res);
+          rec_inf.item = res;
+          if (rec_inf.parent.item == NULL) {
+            *new_parent = rec_inf.item;
           }
+
+          cbor_decref(&res);
+          cbor_decref(&lhs);
+          cbor_decref(&rhs);
+          return PACKED_ERR_NONE;
         }
         case 6: {
           cbor_item_t* tag_new_item = NULL;

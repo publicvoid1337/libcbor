@@ -82,7 +82,7 @@ void print_item_info(cbor_item_t* target, char* identifier);
 
 /* CBOR FUNCTIONS */
 packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
-                            cbor_item_t** out);
+                            cbor_item_t** out, cbor_type string_out_type);
 
 packed_error_t _join(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out,
                      bool inverted);
