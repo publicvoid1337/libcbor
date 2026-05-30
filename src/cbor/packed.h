@@ -15,7 +15,8 @@ typedef enum {
   PACKED_ERR_NOT_SUPPORTED,
   PACKED_ERR_MAX_REF_DEPTH_EXCEEDED,
   _NESTED,
-  _RESOLVE_THEN_REPLACE
+  _RESOLVE_THEN_REPLACE,
+  _TAG_1115
 } packed_error_t;
 
 typedef struct {

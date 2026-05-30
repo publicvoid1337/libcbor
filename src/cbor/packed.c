@@ -9,6 +9,7 @@
 #include "ints.h"
 #include "maps.h"
 #include "strings.h"
+#include "tags.h"
 
 recursion_info_t _new_rec_info(
     cbor_item_t* new_packing_tables[MAX_ACTIVE_TABLES], cbor_item_t* new_item,
@@ -325,6 +326,15 @@ packed_error_t _record(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out) {
   return PACKED_ERR_NONE;
 }
 
+packed_error_t _splice(cbor_item_t* arg, parent_t parent) {
+  if (cbor_typeof(arg) != CBOR_TYPE_ARRAY ||
+      cbor_typeof(parent.item) != CBOR_TYPE_ARRAY) {
+    return PACKED_ERR_UNEXPECTED_FORMAT;
+  }
+  return PACKED_ERR_NONE;
+  // cbor_array_replace(cbor_item_t * item, size_t index, cbor_item_t* value)
+}
+
 // bumps refcount of "out_shared_item" by 1
 // if the user wishes to chase the returned reference,
 // they should use the "out_..." parameters to update the local packing
@@ -512,6 +522,7 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
 
   switch (cbor_typeof(rec_inf.item)) {
     case CBOR_TYPE_ARRAY: {
+      bool splice_afterwards = false;
       for (size_t i = 0; i < cbor_array_size(rec_inf.item); i++) {
         cbor_item_t* child = cbor_array_get(rec_inf.item, i);
         packed_error_t ret = _traverse(
@@ -519,7 +530,39 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
                           rec_inf.ref_depth, rec_inf.num_active),
             &rec_inf.item);
         cbor_decref(&child);
-        CATCH_DECREF_RETURN(ret);
+        /* Splicing Integration Tag Callback (could probably be done nicer)*/
+        if (ret == _TAG_1115) {
+          /* Child is now mutated since a reference was replaced */
+          splice_afterwards = true;
+        } else {
+          CATCH_DECREF_RETURN(ret);
+        }
+      }
+      if (splice_afterwards) {
+        cbor_item_t* res = cbor_new_indefinite_array();
+        for (size_t i = 0; i < cbor_array_size(rec_inf.item); i++) {
+          cbor_item_t* child = cbor_array_get(rec_inf.item, i);
+          if (cbor_typeof(child) == CBOR_TYPE_TAG &&
+              cbor_tag_value(child) == 1115) {
+            cbor_item_t* tag_arg = cbor_tag_item(child);
+            if (cbor_typeof(tag_arg) != CBOR_TYPE_ARRAY) {
+              return PACKED_ERR_UNEXPECTED_FORMAT;
+            }
+            for (size_t j = 0; j < cbor_array_size(tag_arg); j++) {
+              cbor_item_t* child = cbor_array_get(tag_arg, j);
+              assert(cbor_array_push(res, child));
+            }
+          } else {
+            assert(cbor_array_push(res, child));
+          }
+        }
+
+        packed_error_t ret = _replace(rec_inf.parent, rec_inf.item, res);
+        CATCH_DECREF_RETURN(ret, res);
+        rec_inf.item = res;
+        if (rec_inf.parent.item == NULL) {
+          *new_parent = rec_inf.item;
+        }
       }
       return PACKED_ERR_NONE;
     }
@@ -561,6 +604,12 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
           *new_parent = rec_inf.item;
         }
 
+        /* Check integration tags */
+        if (cbor_typeof(rec_inf.item) == CBOR_TYPE_TAG &&
+            cbor_tag_value(rec_inf.item) == 1115) {
+          return _TAG_1115;
+        }
+
         /* Recursively unpack */
         rec_inf.ref_depth++;
         if (rec_inf.ref_depth > MAX_REFERENCE_DEPTH) {
@@ -569,7 +618,6 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
           }
           return PACKED_ERR_MAX_REF_DEPTH_EXCEEDED;
         }
-
         ret = _traverse(rec_inf, &rec_inf.item);
         if (rec_inf.parent.item == NULL) {
           *new_parent = rec_inf.item;
