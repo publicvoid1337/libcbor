@@ -1,6 +1,9 @@
 #include "packed.h"
+#include <cbor/arrays.h>
 #include <cbor/common.h>
 #include <cbor/data.h>
+#include <cbor/maps.h>
+#include <cbor/tags.h>
 #include "floats_ctrls.h"
 #include "ints.h"
 #include "strings.h"
@@ -71,54 +74,54 @@ const char* describe_cbor_type(cbor_item_t* item) {
 
 void print_item_info(cbor_item_t* target, char* identifier) {
   if (target == NULL) {
-    printf("%s=NULL", identifier);
+    printf("%s=NULL         ", identifier);
     return;
   }
   switch (cbor_typeof(target)) {
     case CBOR_TYPE_ARRAY: {
       size_t size = cbor_array_size(target);
-      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), size);
+      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), size);
       return;
     }
     case CBOR_TYPE_BYTESTRING: {
       size_t size = cbor_bytestring_length(target);
-      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), size);
+      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), size);
       return;
     }
     case CBOR_TYPE_FLOAT_CTRL: {
       if (cbor_float_ctrl_is_ctrl(target)) {
         int value = cbor_ctrl_value(target);
-        printf("%s=%s(%d)", identifier, "CTRL", value);
+        printf("%s=%-7s(%-4ld)", identifier, "CTRL", value);
         return;
       } else {
         float value = cbor_float_get_float(target);
-        printf("%s=%s(%f)", identifier, "FLOAT", value);
+        printf("%s=%-7s(%-4ld)", identifier, "FLOAT", value);
       }
       return;
     }
     case CBOR_TYPE_MAP: {
       size_t size = cbor_map_size(target);
-      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), size);
+      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), size);
       return;
     }
     case CBOR_TYPE_NEGINT: {
       int value = cbor_get_int(target);
-      printf("%s=%s(%d)", identifier, describe_cbor_type(target), value);
+      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), value);
       return;
     }
     case CBOR_TYPE_UINT: {
       int value = cbor_get_int(target);
-      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), value);
+      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), value);
       return;
     }
     case CBOR_TYPE_STRING: {
       size_t size = cbor_string_length(target);
-      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), size);
+      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), size);
       return;
     }
     case CBOR_TYPE_TAG: {
       size_t value = cbor_tag_value(target);
-      printf("%s=%s(%ld)", identifier, describe_cbor_type(target), value);
+      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), value);
       return;
     }
   }
@@ -126,6 +129,10 @@ void print_item_info(cbor_item_t* target, char* identifier) {
 
 packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
                             cbor_item_t** out, cbor_type string_out_type) {
+#if PACKED_ENABLE_DEBUG
+  PRINT_DEBUG_MSG("concatenate", NULL, NULL);
+#endif
+
   if (cbor_typeof(lhs) == CBOR_TYPE_ARRAY &&
       cbor_typeof(rhs) == CBOR_TYPE_ARRAY) {
     size_t lhs_size = cbor_array_size(lhs);
@@ -154,20 +161,18 @@ packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
     return PACKED_ERR_NONE;
   } else if (cbor_typeof(lhs) == CBOR_TYPE_MAP &&
              cbor_typeof(rhs) == CBOR_TYPE_MAP) {
-    // This returns a indefinite map, which is maybe wrong
-    cbor_item_t* res = cbor_new_indefinite_map();
-
     struct cbor_pair* rhs_handle = cbor_map_handle(rhs);
     size_t rhs_size = cbor_map_size(rhs);
+    struct cbor_pair* lhs_handle = cbor_map_handle(lhs);
+    size_t lhs_size = cbor_map_size(lhs);
+    cbor_item_t* res = cbor_new_definite_map(lhs_size + rhs_size);
+
     for (size_t i = 0; i < rhs_size; i++) {
       if (cbor_is_undef(rhs_handle[i].value)) {
         continue;
       }
       assert(cbor_map_add(res, rhs_handle[i]));
     }
-
-    struct cbor_pair* lhs_handle = cbor_map_handle(lhs);
-    size_t lhs_size = cbor_map_size(lhs);
     for (size_t j = 0; j < lhs_size; j++) {
       bool skip = false;
       for (size_t i = 0; i < rhs_size; i++) {
@@ -206,8 +211,10 @@ packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
 
     if (string_out_type == CBOR_TYPE_STRING) {
       *out = cbor_build_stringn(res_bytes, lhs_size + rhs_size);
-    } else {
+    } else if (string_out_type == CBOR_TYPE_BYTESTRING) {
       *out = cbor_build_bytestring(res_bytes, lhs_size + rhs_size);
+    } else {
+      return PACKED_ERR_UNEXPECTED_FORMAT;
     }
     return PACKED_ERR_NONE;
   } else if (((cbor_typeof(lhs) == CBOR_TYPE_STRING ||
@@ -223,32 +230,25 @@ packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
   }
 }
 
-packed_error_t _join(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out,
-                     bool inverted) {
+packed_error_t _join(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out) {
+#if PACKED_ENABLE_DEBUG
+  PRINT_DEBUG_MSG("join", NULL, NULL);
+#endif
   // lhs = concatable item
-  // rhs = array of concatable item
-  if (inverted) {
-    cbor_item_t* _tmp = lhs;
-    lhs = rhs;
-    rhs = _tmp;
-  }
-
+  // rhs = array of concatable ite
   if (cbor_typeof(rhs) != CBOR_TYPE_ARRAY) {
     return PACKED_ERR_UNEXPECTED_FORMAT;
   }
 
-  size_t rhs_length = cbor_array_size(rhs);
   cbor_item_t** rhs_handle = cbor_array_handle(rhs);
-  cbor_type out_type;
+  size_t rhs_length = cbor_array_size(rhs);
   if (rhs_length == 0) {
     switch (cbor_typeof(lhs)) {
       case CBOR_TYPE_STRING:
         *out = cbor_new_indefinite_string();
-        out_type = CBOR_TYPE_STRING;
         return PACKED_ERR_NONE;
       case CBOR_TYPE_BYTESTRING:
         *out = cbor_new_indefinite_bytestring();
-        out_type = CBOR_TYPE_BYTESTRING;
         return PACKED_ERR_NONE;
       case CBOR_TYPE_ARRAY:
         *out = cbor_new_indefinite_array();
@@ -266,19 +266,17 @@ packed_error_t _join(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out,
   }
 
   cbor_item_t* res = rhs_handle[0];
+  cbor_type out_type = cbor_typeof(res);
   for (size_t i = 1; i < rhs_length; i++) {
     packed_error_t err;
     if (i % 2 == 1) {
       err = _concatenate(res, lhs, &res, out_type);
-      if (err != PACKED_ERR_NONE) {
-        return err;
-      }
+      CATCH_DECREF_RETURN(err);
     }
     err = _concatenate(res, rhs_handle[i], &res, out_type);
-    if (err != PACKED_ERR_NONE) {
-      return err;
-    }
+    CATCH_DECREF_RETURN(err);
   }
+  cbor_decref(&res);
 
   *out = res;
   return PACKED_ERR_NONE;
@@ -391,6 +389,7 @@ packed_error_t _handle_tag_113(parent_t parent, cbor_item_t* item,
   cbor_item_t* packing_table = cbor_array_get(arr, 0);
   if (packing_table == NULL || cbor_typeof(packing_table) != CBOR_TYPE_ARRAY) {
     cbor_decref(&arr);
+    cbor_decref(&packing_table);
     return PACKED_ERR_UNEXPECTED_FORMAT;
   }
 
@@ -621,6 +620,17 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
 
           /* TODO: Implement handling of function tags as described in the
            * packed cbor specification */
+          int function_id = 0;
+          if (cbor_typeof(lhs) == CBOR_TYPE_TAG) {
+            function_id = cbor_tag_value(lhs);
+            // we do not modify the function tag itself
+            lhs = cbor_tag_item(lhs);
+            if (lhs == NULL) {
+              cbor_decref(&argument);
+              cbor_decref(&rump);
+              return PACKED_ERR_UNEXPECTED_FORMAT;
+            }
+          }
 
           /* Unpack both recursively */
           ret = _traverse(
@@ -637,8 +647,18 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
 
           /* Apply function */
           cbor_item_t* res;
-          ret = _concatenate(lhs, rhs, &res, cbor_typeof(rump));
-          CATCH_DECREF_RETURN_1(ret, argument, rump, res);
+          switch (function_id) {
+            case 0: {
+              ret = _concatenate(lhs, rhs, &res, cbor_typeof(rump));
+              CATCH_DECREF_RETURN_1(ret, argument, rump, res);
+              break;
+            }
+            case 106: {
+              ret = _join(lhs, rhs, &res);
+              CATCH_DECREF_RETURN_1(ret, argument, rump, res);
+              break;
+            }
+          }
 
           /* Replace reference with result of function application */
           ret = _replace(rec_inf.parent, rec_inf.item, res);
@@ -648,7 +668,7 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
             *new_parent = rec_inf.item;
           }
 
-          cbor_decref(&res);
+          cbor_decref(&rec_inf.item);
           cbor_decref(&lhs);
           cbor_decref(&rhs);
           return PACKED_ERR_NONE;

@@ -48,7 +48,7 @@ void print_item_info(cbor_item_t* target, char* identifier);
   do {                                        \
     printf("[%-14s]  ", caller);              \
     print_item_info(item, "curr");            \
-    printf(" ");                              \
+    printf("  ");                             \
     print_item_info(parent, "parent");        \
     printf("\n");                             \
   } while (0)
@@ -84,8 +84,7 @@ void print_item_info(cbor_item_t* target, char* identifier);
 packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
                             cbor_item_t** out, cbor_type string_out_type);
 
-packed_error_t _join(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out,
-                     bool inverted);
+packed_error_t _join(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out);
 
 /* UTILITY FUNCTIONS */
 
