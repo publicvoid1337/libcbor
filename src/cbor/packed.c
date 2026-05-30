@@ -7,6 +7,7 @@
 #include "arrays.h"
 #include "floats_ctrls.h"
 #include "ints.h"
+#include "maps.h"
 #include "strings.h"
 
 recursion_info_t _new_rec_info(
@@ -226,10 +227,11 @@ packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
               cbor_typeof(lhs) == CBOR_TYPE_ARRAY)) {
     /* TODO: this parameter is never used which may lead to wrong results */
     cbor_type res_type = cbor_typeof(rhs);
-    lhs = (cbor_typeof(lhs) == CBOR_TYPE_STRING) ? lhs : rhs;
-    rhs = (cbor_typeof(rhs) == CBOR_TYPE_STRING) ? lhs : rhs;
+    cbor_item_t *_lhs, *_rhs;
+    _lhs = (cbor_typeof(lhs) == CBOR_TYPE_STRING) ? lhs : rhs;
+    _rhs = (cbor_typeof(rhs) == CBOR_TYPE_STRING) ? lhs : rhs;
 
-    return _join(lhs, rhs, out);
+    return _join(_lhs, _rhs, out);
   } else {
     return PACKED_ERR_UNEXPECTED_FORMAT;
   }
@@ -286,6 +288,37 @@ packed_error_t _join(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out) {
     cbor_decref(&res);
     CATCH_DECREF_RETURN(err);
     res = next;
+  }
+
+  *out = res;
+  return PACKED_ERR_NONE;
+}
+
+packed_error_t _record(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out) {
+  if (cbor_typeof(lhs) != CBOR_TYPE_ARRAY ||
+      cbor_typeof(rhs) != CBOR_TYPE_ARRAY) {
+    return PACKED_ERR_UNEXPECTED_FORMAT;
+  }
+
+  cbor_item_t** lhs_handle = cbor_array_handle(lhs);
+  size_t lhs_size = cbor_array_size(lhs);
+  cbor_item_t** rhs_handle = cbor_array_handle(rhs);
+  size_t rhs_size = cbor_array_size(rhs);
+  if (rhs_size > lhs_size) {
+    return PACKED_ERR_UNEXPECTED_FORMAT;
+  }
+
+  cbor_item_t* res = cbor_new_definite_map(lhs_size);
+  for (size_t i = 0; i < lhs_size; i++) {
+    if (i >= rhs_size) {
+      continue;
+    }
+    if (cbor_is_undef(rhs_handle[i])) {
+      continue;
+    }
+
+    struct cbor_pair pair = {.key = lhs_handle[i], .value = rhs_handle[i]};
+    assert(cbor_map_add(res, pair));
   }
 
   *out = res;
@@ -656,14 +689,30 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
           /* Apply function */
           cbor_item_t* res = NULL;
           switch (function_id) {
+            /* No function tag specified - concatenate */
             case 0: {
               ret = _concatenate(lhs, rhs, &res, cbor_typeof(rump));
               CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
                                     res);
               break;
             }
+            /* Interchanged join */
+            case 105: {
+              ret = _join(rhs, lhs, &res);
+              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
+                                    res);
+              break;
+            }
+            /* Join*/
             case 106: {
               ret = _join(lhs, rhs, &res);
+              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
+                                    res);
+              break;
+            }
+            /* Record */
+            case 114: {
+              ret = _record(lhs, rhs, &res);
               CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
                                     res);
               break;

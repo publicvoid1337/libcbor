@@ -86,6 +86,8 @@ packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
 
 packed_error_t _join(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out);
 
+packed_error_t _record(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out);
+
 /* UTILITY FUNCTIONS */
 
 // bumps refcount of "out_shared_item" by 1
