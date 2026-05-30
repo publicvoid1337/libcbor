@@ -4,6 +4,7 @@
 #include <cbor/data.h>
 #include <cbor/maps.h>
 #include <cbor/tags.h>
+#include "arrays.h"
 #include "floats_ctrls.h"
 #include "ints.h"
 #include "strings.h"
@@ -223,8 +224,12 @@ packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
              ((cbor_typeof(rhs) == CBOR_TYPE_STRING ||
                cbor_typeof(rhs) == CBOR_TYPE_STRING) &&
               cbor_typeof(lhs) == CBOR_TYPE_ARRAY)) {
-    // equivalent to join function
-    return PACKED_ERR_NOT_SUPPORTED;
+    /* TODO: this parameter is never used which may lead to wrong results */
+    cbor_type res_type = cbor_typeof(rhs);
+    lhs = (cbor_typeof(lhs) == CBOR_TYPE_STRING) ? lhs : rhs;
+    rhs = (cbor_typeof(rhs) == CBOR_TYPE_STRING) ? lhs : rhs;
+
+    return _join(lhs, rhs, out);
   } else {
     return PACKED_ERR_UNEXPECTED_FORMAT;
   }
@@ -328,6 +333,7 @@ packed_error_t _replace(parent_t parent, cbor_item_t* old_item,
 #if PACKED_ENABLE_DEBUG
   PRINT_DEBUG_MSG("replace", old_item, parent.item);
 #endif
+
   if (new_item == NULL) {
     return PACKED_ERR_UNEXPECTED_FORMAT;
   }
@@ -406,12 +412,7 @@ packed_error_t _handle_tag_113(parent_t parent, cbor_item_t* item,
   }
 
   packed_error_t ret = _replace(parent, item, packed_data);
-  if (ret != PACKED_ERR_NONE) {
-    cbor_decref(&packed_data);
-    cbor_decref(&packing_table);
-    cbor_decref(&arr);
-    return ret;
-  }
+  CATCH_DECREF_RETURN_1(ret, packed_data, packing_table, arr);
 
   cbor_decref(&arr);
   /* At this point item is mutated! */
