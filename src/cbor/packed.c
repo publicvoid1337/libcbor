@@ -644,35 +644,66 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
             cbor_decref(&tag_arg);
             return PACKED_ERR_NONE;
           } else {
-            /* Recursively unpack tag content */
-            rec_inf.parent.item = rec_inf.item;
-            rec_inf.item = tag_arg;
+            /* The tag argument is not a plain integer — resolve it recursively
+             * to obtain the index, then replace the entire TAG(6) node in its
+             * original parent. */
 
-            cbor_decref(&tag_arg);
-            cbor_item_t* new_item = NULL;
+            /* Preserve the original parent before we do anything else. */
+            parent_t original_parent = rec_inf.parent;
+            cbor_item_t* outer_tag = rec_inf.item;
+
+            /* Traverse tag_arg with outer_tag as its parent so that _replace()
+             * inside the traversal updates outer_tag's content in-place once
+             * the inner reference resolves to an integer. */
+            cbor_item_t* new_inner = NULL;
             packed_error_t ret = _traverse(
-                _new_rec_info(rec_inf.tables, tag_arg, rec_inf.item, 0, false,
+                _new_rec_info(rec_inf.tables, tag_arg, outer_tag, 0, false,
                               rec_inf.ref_depth, rec_inf.num_active),
-                &new_item);
+                &new_inner);
+            cbor_decref(&tag_arg);
             CATCH_DECREF_RETURN(ret);
 
-            /* Get new replaced child and restart resolution */
-            cbor_item_t* tag_arg = cbor_tag_item(rec_inf.item);
-            if (tag_arg == NULL) {
+            /* Read the now-resolved integer index back from outer_tag's
+             * content. */
+            cbor_item_t* resolved_idx_item = cbor_tag_item(outer_tag);
+            if (resolved_idx_item == NULL) {
               return PACKED_ERR_UNEXPECTED_FORMAT;
             }
 
-            size_t idx = (cbor_typeof(tag_arg) == CBOR_TYPE_UINT)
-                             ? (16 + 2 * cbor_get_int(tag_arg))
-                             : (16 - 2 * cbor_get_int(tag_arg) - 1);
-            /* TODO: Debug purposes only*/
-            idx = cbor_get_int(tag_arg);
+            size_t idx = (cbor_typeof(resolved_idx_item) == CBOR_TYPE_UINT)
+                             ? (16 + 2 * cbor_get_int(resolved_idx_item))
+                             : (16 - 2 * cbor_get_int(resolved_idx_item) - 1);
+            /* TODO: Debug purposes only */
+            idx = cbor_get_int(resolved_idx_item);
             /* */
+            cbor_decref(&resolved_idx_item);
+
+            /* Replace outer_tag in its *original* parent with the looked-up
+             * shared item — not in outer_tag itself. */
             rec_inf.ref_depth++;
-            new_item = NULL;
+            cbor_item_t* new_item = NULL;
             ret = _resolve_shared_item_ref(
                 rec_inf.tables, rec_inf.num_active, idx, rec_inf.ref_depth,
-                rec_inf.parent, rec_inf.item, &new_item);
+                original_parent, outer_tag, &new_item);
+            if (ret == _TAG_1115) {
+              if (original_parent.item == NULL) {
+                *new_parent = rec_inf.item;
+              }
+              return ret;
+            }
+            CATCH_DECREF_RETURN(ret);
+
+            rec_inf.item = new_item;
+            rec_inf.parent = original_parent;
+            if (original_parent.item == NULL) {
+              *new_parent = rec_inf.item;
+            }
+
+            /* Recursively unpack the resolved item. */
+            ret = _traverse(rec_inf, &rec_inf.item);
+            if (original_parent.item == NULL) {
+              *new_parent = rec_inf.item;
+            }
             CATCH_DECREF_RETURN(ret);
 
             return PACKED_ERR_NONE;
