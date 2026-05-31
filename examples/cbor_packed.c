@@ -37,7 +37,7 @@ unsigned char TAG6_UNPACKING_6[] = {0xD8, 0x71, 0x82, 0x83, 0xC6, 0xC6, 0x01,
 int main(void) {
   struct cbor_load_result res;
   cbor_item_t* item =
-      cbor_load(TAG6_UNPACKING_3, sizeof(TAG6_UNPACKING_3), &res);
+      cbor_load(TAG6_UNPACKING_5, sizeof(TAG6_UNPACKING_5), &res);
   assert(res.error.code == CBOR_ERR_NONE);
 
   puts("\n");

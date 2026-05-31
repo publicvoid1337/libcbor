@@ -502,10 +502,13 @@ packed_error_t _resolve_shared_item_ref(cbor_item_t* tables[MAX_ACTIVE_TABLES],
   ret = _replace(parent, item, unpacked_item);
   CATCH_DECREF_RETURN(ret, unpacked_item);
   item = unpacked_item;
+  if (parent.item != NULL) {
+    cbor_decref(&unpacked_item);
+  }
 
   /* Check integration tags */
-  if (cbor_typeof(unpacked_item) == CBOR_TYPE_TAG) {
-    switch (cbor_tag_value(unpacked_item)) {
+  if (cbor_typeof(item) == CBOR_TYPE_TAG) {
+    switch (cbor_tag_value(item)) {
       case 1115: {
         /* Our parent must be an array */
         cbor_decref(&unpacked_item);
@@ -515,7 +518,6 @@ packed_error_t _resolve_shared_item_ref(cbor_item_t* tables[MAX_ACTIVE_TABLES],
   }
 
   *new_item = item;
-  // cbor_decref(&unpacked_item);
   return PACKED_ERR_NONE;
 }
 
