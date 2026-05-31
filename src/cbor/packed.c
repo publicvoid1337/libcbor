@@ -83,48 +83,48 @@ void print_item_info(cbor_item_t* target, char* identifier) {
   switch (cbor_typeof(target)) {
     case CBOR_TYPE_ARRAY: {
       size_t size = cbor_array_size(target);
-      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), size);
+      printf("%s=%-7s(%-4zu)", identifier, describe_cbor_type(target), size);
       return;
     }
     case CBOR_TYPE_BYTESTRING: {
       size_t size = cbor_bytestring_length(target);
-      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), size);
+      printf("%s=%-7s(%-4zu)", identifier, describe_cbor_type(target), size);
       return;
     }
     case CBOR_TYPE_FLOAT_CTRL: {
       if (cbor_float_ctrl_is_ctrl(target)) {
         int value = cbor_ctrl_value(target);
-        printf("%s=%-7s(%-4ld)", identifier, "CTRL", value);
+        printf("%s=%-7s(%-4d)", identifier, "CTRL", value);
         return;
       } else {
         float value = cbor_float_get_float(target);
-        printf("%s=%-7s(%-4ld)", identifier, "FLOAT", value);
+        printf("%s=%-7s(%-4f)", identifier, "FLOAT", value);
       }
       return;
     }
     case CBOR_TYPE_MAP: {
       size_t size = cbor_map_size(target);
-      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), size);
+      printf("%s=%-7s(%-4zu)", identifier, describe_cbor_type(target), size);
       return;
     }
     case CBOR_TYPE_NEGINT: {
       int value = cbor_get_int(target);
-      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), value);
+      printf("%s=%-7s(%-4d)", identifier, describe_cbor_type(target), value);
       return;
     }
     case CBOR_TYPE_UINT: {
       int value = cbor_get_int(target);
-      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), value);
+      printf("%s=%-7s(%-4d)", identifier, describe_cbor_type(target), value);
       return;
     }
     case CBOR_TYPE_STRING: {
       size_t size = cbor_string_length(target);
-      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), size);
+      printf("%s=%-7s(%-4zu)", identifier, describe_cbor_type(target), size);
       return;
     }
     case CBOR_TYPE_TAG: {
       size_t value = cbor_tag_value(target);
-      printf("%s=%-7s(%-4ld)", identifier, describe_cbor_type(target), value);
+      printf("%s=%-7s(%-4zu)", identifier, describe_cbor_type(target), value);
       return;
     }
   }
@@ -207,13 +207,12 @@ packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
                           ? cbor_string_length(rhs)
                           : cbor_bytestring_length(rhs);
 
-    cbor_item_t* res;
     unsigned char res_bytes[lhs_size + rhs_size];
     memcpy(res_bytes, lhs_handle, lhs_size);
     memcpy(res_bytes + lhs_size, rhs_handle, rhs_size);
 
     if (string_out_type == CBOR_TYPE_STRING) {
-      *out = cbor_build_stringn(res_bytes, lhs_size + rhs_size);
+      *out = cbor_build_stringn((const char*)res_bytes, lhs_size + rhs_size);
     } else if (string_out_type == CBOR_TYPE_BYTESTRING) {
       *out = cbor_build_bytestring(res_bytes, lhs_size + rhs_size);
     } else {
@@ -227,7 +226,6 @@ packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
                cbor_typeof(rhs) == CBOR_TYPE_STRING) &&
               cbor_typeof(lhs) == CBOR_TYPE_ARRAY)) {
     /* TODO: this parameter is never used which may lead to wrong results */
-    cbor_type res_type = cbor_typeof(rhs);
     cbor_item_t *_lhs, *_rhs;
     _lhs = (cbor_typeof(lhs) == CBOR_TYPE_STRING) ? lhs : rhs;
     _rhs = (cbor_typeof(rhs) == CBOR_TYPE_STRING) ? lhs : rhs;
@@ -326,7 +324,9 @@ packed_error_t _record(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out) {
   return PACKED_ERR_NONE;
 }
 
-packed_error_t _splice(cbor_item_t* arg, parent_t parent, cbor_item_t** out) {
+packed_error_t _splice(cbor_item_t* arg,
+                       parent_t parent __attribute__((unused)),
+                       cbor_item_t** out) {
   cbor_item_t* res = cbor_new_indefinite_array();
   for (size_t i = 0; i < cbor_array_size(arg); i++) {
     cbor_item_t* child = cbor_array_get(arg, i);
@@ -485,6 +485,40 @@ packed_error_t _consume_table_113(parent_t parent, cbor_item_t* item,
   return PACKED_ERR_NONE;
 }
 
+packed_error_t _resolve_shared_item_ref(cbor_item_t* tables[MAX_ACTIVE_TABLES],
+                                        uint8_t num_active, size_t index,
+                                        size_t ref_depth, parent_t parent,
+                                        cbor_item_t* item,
+                                        cbor_item_t** new_item) {
+  if (ref_depth > MAX_REFERENCE_DEPTH) {
+    return PACKED_ERR_MAX_REF_DEPTH_EXCEEDED;
+  }
+
+  cbor_item_t* unpacked_item = NULL;
+  packed_error_t ret = _packing_table_get(tables, num_active, index,
+                                          &unpacked_item, NULL, NULL, NULL);
+  CATCH_DECREF_RETURN(ret);
+
+  ret = _replace(parent, item, unpacked_item);
+  CATCH_DECREF_RETURN(ret, unpacked_item);
+  item = unpacked_item;
+
+  /* Check integration tags */
+  if (cbor_typeof(unpacked_item) == CBOR_TYPE_TAG) {
+    switch (cbor_tag_value(unpacked_item)) {
+      case 1115: {
+        /* Our parent must be an array */
+        cbor_decref(&unpacked_item);
+        return _TAG_1115;
+      }
+    }
+  }
+
+  *new_item = item;
+  // cbor_decref(&unpacked_item);
+  return PACKED_ERR_NONE;
+}
+
 packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
 #if PACKED_ENABLE_DEBUG
   PRINT_DEBUG_MSG("traverse", rec_inf.item, rec_inf.parent.item);
@@ -542,47 +576,24 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
     case CBOR_TYPE_FLOAT_CTRL: {
       /* Simple value in range 0-15 => Shared item refrence */
       if (cbor_float_ctrl_is_ctrl(rec_inf.item) &&
-          (cbor_ctrl_value(rec_inf.item) >= 0 &&
-           cbor_ctrl_value(rec_inf.item) <= 15)) {
-        size_t index = cbor_ctrl_value(rec_inf.item);
-
-        cbor_item_t* unpacked_item = NULL;
-        packed_error_t ret =
-            _packing_table_get(rec_inf.tables, rec_inf.num_active, index,
-                               &unpacked_item, NULL, NULL, NULL);
+          (cbor_ctrl_value(rec_inf.item) <= 15)) {
+        cbor_item_t* new_item = NULL;
+        size_t idx = cbor_ctrl_value(rec_inf.item);
+        rec_inf.ref_depth++;
+        packed_error_t ret = _resolve_shared_item_ref(
+            rec_inf.tables, rec_inf.num_active, idx, rec_inf.ref_depth,
+            rec_inf.parent, rec_inf.item, &new_item);
         CATCH_DECREF_RETURN(ret);
 
-        ret = _replace(rec_inf.parent, rec_inf.item, unpacked_item);
-        CATCH_DECREF_RETURN(ret, unpacked_item);
-        rec_inf.item = unpacked_item;
+        rec_inf.item = new_item;
         if (rec_inf.parent.item == NULL) {
           *new_parent = rec_inf.item;
-        }
-
-        /* Check integration tags */
-        if (cbor_typeof(rec_inf.item) == CBOR_TYPE_TAG) {
-          switch (cbor_tag_value(rec_inf.item)) {
-            case 1115: {
-              /* Our parent must be an array */
-              cbor_decref(&unpacked_item);
-              return _TAG_1115;
-            }
-          }
         }
 
         /* Recursively unpack */
-        rec_inf.ref_depth++;
-        if (rec_inf.ref_depth > MAX_REFERENCE_DEPTH) {
-          if (rec_inf.parent.item != NULL) {
-            cbor_decref(&unpacked_item);
-          }
-          return PACKED_ERR_MAX_REF_DEPTH_EXCEEDED;
-        }
         ret = _traverse(rec_inf, &rec_inf.item);
         if (rec_inf.parent.item == NULL) {
           *new_parent = rec_inf.item;
-        } else {
-          cbor_decref(&unpacked_item);
         }
         CATCH_DECREF_RETURN(ret);
       }
@@ -590,6 +601,84 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
     }
     case CBOR_TYPE_TAG: {
       switch (cbor_tag_value(rec_inf.item)) {
+        /* Argument or shared item reference */
+        case 6: {
+          cbor_item_t* tag_arg = cbor_tag_item(rec_inf.item);
+          if (tag_arg == NULL) {
+            return PACKED_ERR_UNEXPECTED_FORMAT;
+          }
+
+          if (cbor_typeof(tag_arg) == CBOR_TYPE_UINT ||
+              cbor_typeof(tag_arg) == CBOR_TYPE_NEGINT) {
+            cbor_item_t* new_item = NULL;
+            size_t idx = (cbor_typeof(tag_arg) == CBOR_TYPE_UINT)
+                             ? (16 + 2 * cbor_get_int(tag_arg))
+                             : (16 - 2 * cbor_get_int(tag_arg) - 1);
+            /* TODO: Debug purposes only*/
+            idx = cbor_get_int(tag_arg);
+            /* */
+            rec_inf.ref_depth++;
+            packed_error_t ret = _resolve_shared_item_ref(
+                rec_inf.tables, rec_inf.num_active, idx, rec_inf.ref_depth,
+                rec_inf.parent, rec_inf.item, &new_item);
+            if (ret == _TAG_1115) {
+              if (rec_inf.parent.item == NULL) {
+                *new_parent = rec_inf.item;
+              }
+              return ret;
+            }
+            CATCH_DECREF_RETURN(ret);
+
+            rec_inf.item = new_item;
+            if (rec_inf.parent.item == NULL) {
+              *new_parent = rec_inf.item;
+            }
+
+            /* Recursively unpack */
+            ret = _traverse(rec_inf, &rec_inf.item);
+            if (rec_inf.parent.item == NULL) {
+              *new_parent = rec_inf.item;
+            }
+            CATCH_DECREF_RETURN(ret);
+
+            cbor_decref(&tag_arg);
+            return PACKED_ERR_NONE;
+          } else {
+            /* Recursively unpack tag content */
+            rec_inf.parent.item = rec_inf.item;
+            rec_inf.item = tag_arg;
+
+            cbor_decref(&tag_arg);
+            cbor_item_t* new_item = NULL;
+            packed_error_t ret = _traverse(
+                _new_rec_info(rec_inf.tables, tag_arg, rec_inf.item, 0, false,
+                              rec_inf.ref_depth, rec_inf.num_active),
+                &new_item);
+            CATCH_DECREF_RETURN(ret);
+
+            /* Get new replaced child and restart resolution */
+            cbor_item_t* tag_arg = cbor_tag_item(rec_inf.item);
+            if (tag_arg == NULL) {
+              return PACKED_ERR_UNEXPECTED_FORMAT;
+            }
+
+            size_t idx = (cbor_typeof(tag_arg) == CBOR_TYPE_UINT)
+                             ? (16 + 2 * cbor_get_int(tag_arg))
+                             : (16 - 2 * cbor_get_int(tag_arg) - 1);
+            /* TODO: Debug purposes only*/
+            idx = cbor_get_int(tag_arg);
+            /* */
+            rec_inf.ref_depth++;
+            new_item = NULL;
+            ret = _resolve_shared_item_ref(
+                rec_inf.tables, rec_inf.num_active, idx, rec_inf.ref_depth,
+                rec_inf.parent, rec_inf.item, &new_item);
+            CATCH_DECREF_RETURN(ret);
+
+            return PACKED_ERR_NONE;
+          }
+          return PACKED_ERR_NOT_SUPPORTED;
+        }
         /* Basic Packed CBOR (shared table) */
         case 113: {
           /* Consume the table definition, recieving the packing table and the
@@ -743,10 +832,6 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
             cbor_decref(&function_argument);
           }
           return PACKED_ERR_NONE;
-        }
-        /* Argument or shared item reference */
-        case 6: {
-          return PACKED_ERR_NOT_SUPPORTED;
         }
         /* Tag not specified by packed cbor */
         default: {
