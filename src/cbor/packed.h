@@ -25,19 +25,39 @@ typedef struct {
   bool is_key;
 } parent_t;
 
+struct table_definition {
+  bool is_basic;
+  union {
+    struct {
+      cbor_item_t* combined_table;
+    } basic;
+    struct {
+      cbor_item_t* shareditem_table;
+      cbor_item_t* argument_table;
+    } split;
+  };
+};
+
+typedef struct {
+  struct table_definition tables[MAX_ACTIVE_TABLES];
+  uint8_t num_active;
+  // size_t shareditem_idx;
+  // size_t argument_idx;
+} packing_ctx_t;
+
 typedef struct {
   parent_t parent;
   cbor_item_t* item;
-  cbor_item_t* tables[MAX_ACTIVE_TABLES];
-  uint8_t num_active;
+  packing_ctx_t packing_ctx;
   uint8_t ref_depth;
 } recursion_info_t;
 
 /* HELPER FUNCTIONS */
-recursion_info_t _new_rec_info(
-    cbor_item_t* new_packing_tables[MAX_ACTIVE_TABLES], cbor_item_t* new_item,
-    cbor_item_t* new_parent_item, size_t new_parent_idx, bool new_parent_is_key,
-    uint8_t ref_depth, uint8_t num_active);
+recursion_info_t _new_rec_info(packing_ctx_t new_packing_ctx,
+                               cbor_item_t* new_item,
+                               cbor_item_t* new_parent_item,
+                               size_t new_parent_idx, bool new_parent_is_key,
+                               uint8_t ref_depth);
 
 const char* describe_error(packed_error_t error);
 
@@ -95,8 +115,8 @@ packed_error_t _record(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out);
 // if the user wishes to chase the returned reference,
 // they should use the "out_..." parameters to update the local packing
 // evironment
-packed_error_t _packing_table_get(cbor_item_t* tables[MAX_ACTIVE_TABLES],
-                                  uint8_t num_active, size_t index,
+packed_error_t _packing_table_get(packing_ctx_t packing_ctx, size_t index,
+                                  bool is_arg_ref,
                                   cbor_item_t** out_shared_item,
                                   cbor_item_t** out_table, size_t* out_index,
                                   uint8_t* out_num_active);

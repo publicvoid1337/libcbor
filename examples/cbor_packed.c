@@ -45,7 +45,9 @@ int main(void) {
   size_t serialized_size = cbor_serialized_size(item);
   printf("  ---->  Serialized size: %zu bytes\n\n", serialized_size);
 
-  recursion_info_t rec_inf = _new_rec_info(NULL, item, NULL, 0, false, 0, 0);
+  packing_ctx_t packing_ctx;
+  recursion_info_t rec_inf =
+      _new_rec_info(packing_ctx, item, NULL, 0, false, 0);
   cbor_item_t* new_item = NULL;
   packed_error_t ret = _traverse(rec_inf, &new_item);
   if (new_item != NULL) {
@@ -61,9 +63,9 @@ int main(void) {
   }
 
   cbor_decref(&rec_inf.item);
-  if (rec_inf.num_active > 0) {
-    cbor_decref(&rec_inf.tables[rec_inf.num_active - 1]);
-    rec_inf.num_active--;
-  }
+  // if (rec_inf.num_active > 0) {
+  //   cbor_decref(&rec_inf.tables[rec_inf.num_active - 1]);
+  //   rec_inf.num_active--;
+  // }
   return 0;
 }

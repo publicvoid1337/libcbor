@@ -11,22 +11,18 @@
 #include "strings.h"
 #include "tags.h"
 
-recursion_info_t _new_rec_info(
-    cbor_item_t* new_packing_tables[MAX_ACTIVE_TABLES], cbor_item_t* new_item,
-    cbor_item_t* new_parent_item, size_t new_parent_idx, bool new_parent_is_key,
-    uint8_t ref_depth, uint8_t num_active) {
+recursion_info_t _new_rec_info(packing_ctx_t new_packing_ctx,
+                               cbor_item_t* new_item,
+                               cbor_item_t* new_parent_item,
+                               size_t new_parent_idx, bool new_parent_is_key,
+                               uint8_t ref_depth) {
   parent_t parent = {.index = new_parent_idx,
                      .item = new_parent_item,
                      .is_key = new_parent_is_key};
   recursion_info_t rec_inf = {.parent = parent,
                               .item = new_item,
                               .ref_depth = ref_depth,
-                              .num_active = num_active};
-  for (size_t i = 0; i < MAX_ACTIVE_TABLES; i++) {
-    rec_inf.tables[i] = new_packing_tables != NULL && i < num_active
-                            ? new_packing_tables[i]
-                            : NULL;
-  }
+                              .packing_ctx = new_packing_ctx};
   return rec_inf;
 }
 
@@ -360,35 +356,71 @@ packed_error_t _splice(cbor_item_t* arg,
 // if the user wishes to chase the returned reference,
 // they should use the "out_..." parameters to update the local packing
 // evironment
-packed_error_t _packing_table_get(cbor_item_t* tables[MAX_ACTIVE_TABLES],
-                                  uint8_t num_active, size_t index,
+packed_error_t _packing_table_get(packing_ctx_t packing_ctx, size_t index,
+                                  bool is_arg_ref,
                                   cbor_item_t** out_shared_item,
                                   cbor_item_t** out_table, size_t* out_index,
                                   uint8_t* out_num_active) {
-  while (num_active > 0) {
-    size_t table_range = cbor_array_size(tables[num_active - 1]);
+  int curr_table_idx = packing_ctx.num_active - 1;
+  while (curr_table_idx > 0) {
+    size_t table_range;
+    if (packing_ctx.tables[curr_table_idx].is_basic) {
+      table_range = cbor_array_size(
+          packing_ctx.tables[curr_table_idx].basic.combined_table);
+    } else {
+      table_range =
+          is_arg_ref
+              ? cbor_array_size(
+                    packing_ctx.tables[curr_table_idx].split.argument_table)
+              : cbor_array_size(
+                    packing_ctx.tables[curr_table_idx].split.shareditem_table);
+    }
     if (index < table_range) {
       break;
     }
     index -= table_range;
-    num_active--;
+    curr_table_idx--;
   }
-  if (num_active == 0) {
+  if (curr_table_idx < 0) {
     return PACKED_ERR_UNDEFINED_REFERENCE;
   }
-  *out_shared_item = cbor_array_get(tables[num_active - 1], index);
+
+  if (packing_ctx.tables[curr_table_idx].is_basic) {
+    *out_shared_item = cbor_array_get(
+        packing_ctx.tables[curr_table_idx].basic.combined_table, index);
+  } else {
+    *out_shared_item =
+        is_arg_ref
+            ? cbor_array_get(
+                  packing_ctx.tables[curr_table_idx].split.argument_table,
+                  index)
+            : cbor_array_get(
+                  packing_ctx.tables[curr_table_idx].split.shareditem_table,
+                  index);
+  }
   if (*out_shared_item == NULL) {
     return PACKED_ERR_UNDEFINED_REFERENCE;
   }
+
   if (out_table != NULL) {
-    *out_table = tables[num_active - 1];
+    if (packing_ctx.tables[curr_table_idx].is_basic) {
+      *out_table = packing_ctx.tables[curr_table_idx].basic.combined_table;
+    } else {
+      *out_table =
+          is_arg_ref
+              ? packing_ctx.tables[curr_table_idx].split.argument_table
+              : packing_ctx.tables[curr_table_idx].split.shareditem_table;
+    }
   }
+  /*
   if (out_index != NULL) {
     *out_index = index;
   }
   if (out_num_active != NULL) {
     *out_num_active = num_active;
   }
+  */
+
   return PACKED_ERR_NONE;
 }
 
@@ -485,8 +517,7 @@ packed_error_t _consume_table_113(parent_t parent, cbor_item_t* item,
   return PACKED_ERR_NONE;
 }
 
-packed_error_t _resolve_shared_item_ref(cbor_item_t* tables[MAX_ACTIVE_TABLES],
-                                        uint8_t num_active, size_t index,
+packed_error_t _resolve_shared_item_ref(packing_ctx_t packing_ctx, size_t index,
                                         size_t ref_depth, parent_t parent,
                                         cbor_item_t* item,
                                         cbor_item_t** new_item) {
@@ -495,7 +526,7 @@ packed_error_t _resolve_shared_item_ref(cbor_item_t* tables[MAX_ACTIVE_TABLES],
   }
 
   cbor_item_t* unpacked_item = NULL;
-  packed_error_t ret = _packing_table_get(tables, num_active, index,
+  packed_error_t ret = _packing_table_get(packing_ctx, index, false,
                                           &unpacked_item, NULL, NULL, NULL);
   CATCH_DECREF_RETURN(ret);
 
@@ -531,10 +562,10 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
       bool splice_afterwards = false;
       for (size_t i = 0; i < cbor_array_size(rec_inf.item); i++) {
         cbor_item_t* child = cbor_array_get(rec_inf.item, i);
-        packed_error_t ret = _traverse(
-            _new_rec_info(rec_inf.tables, child, rec_inf.item, i, false,
-                          rec_inf.ref_depth, rec_inf.num_active),
-            &rec_inf.item);
+        packed_error_t ret =
+            _traverse(_new_rec_info(rec_inf.packing_ctx, child, rec_inf.item, i,
+                                    false, rec_inf.ref_depth),
+                      &rec_inf.item);
         cbor_decref(&child);
         /* Splicing Integration Tag Callback (could probably be done nicer)*/
         if (ret == _TAG_1115) {
@@ -561,16 +592,16 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
       struct cbor_pair* pairs = cbor_map_handle(rec_inf.item);
       /* Pairwise recursive calls with increasing index */
       for (size_t i = 0; i < cbor_map_size(rec_inf.item); i++) {
-        packed_error_t ret = _traverse(
-            _new_rec_info(rec_inf.tables, pairs[i].key, rec_inf.item, i, true,
-                          rec_inf.ref_depth, rec_inf.num_active),
-            &rec_inf.item);
+        packed_error_t ret =
+            _traverse(_new_rec_info(rec_inf.packing_ctx, pairs[i].key,
+                                    rec_inf.item, i, true, rec_inf.ref_depth),
+                      &rec_inf.item);
         CATCH_DECREF_RETURN(ret);
 
-        ret = _traverse(
-            _new_rec_info(rec_inf.tables, pairs[i].value, rec_inf.item, i,
-                          false, rec_inf.ref_depth, rec_inf.num_active),
-            &rec_inf.item);
+        ret =
+            _traverse(_new_rec_info(rec_inf.packing_ctx, pairs[i].value,
+                                    rec_inf.item, i, false, rec_inf.ref_depth),
+                      &rec_inf.item);
         CATCH_DECREF_RETURN(ret);
       }
       return PACKED_ERR_NONE;
@@ -583,8 +614,8 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
         size_t idx = cbor_ctrl_value(rec_inf.item);
         rec_inf.ref_depth++;
         packed_error_t ret = _resolve_shared_item_ref(
-            rec_inf.tables, rec_inf.num_active, idx, rec_inf.ref_depth,
-            rec_inf.parent, rec_inf.item, &new_item);
+            rec_inf.packing_ctx, idx, rec_inf.ref_depth, rec_inf.parent,
+            rec_inf.item, &new_item);
         CATCH_DECREF_RETURN(ret);
 
         rec_inf.item = new_item;
@@ -621,8 +652,8 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
             /* */
             rec_inf.ref_depth++;
             packed_error_t ret = _resolve_shared_item_ref(
-                rec_inf.tables, rec_inf.num_active, idx, rec_inf.ref_depth,
-                rec_inf.parent, rec_inf.item, &new_item);
+                rec_inf.packing_ctx, idx, rec_inf.ref_depth, rec_inf.parent,
+                rec_inf.item, &new_item);
             if (ret == _TAG_1115) {
               if (rec_inf.parent.item == NULL) {
                 *new_parent = rec_inf.item;
@@ -658,10 +689,10 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
              * inside the traversal updates outer_tag's content in-place once
              * the inner reference resolves to an integer. */
             cbor_item_t* new_inner = NULL;
-            packed_error_t ret = _traverse(
-                _new_rec_info(rec_inf.tables, tag_arg, outer_tag, 0, false,
-                              rec_inf.ref_depth, rec_inf.num_active),
-                &new_inner);
+            packed_error_t ret =
+                _traverse(_new_rec_info(rec_inf.packing_ctx, tag_arg, outer_tag,
+                                        0, false, rec_inf.ref_depth),
+                          &new_inner);
             cbor_decref(&tag_arg);
             CATCH_DECREF_RETURN(ret);
 
@@ -684,9 +715,9 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
              * shared item — not in outer_tag itself. */
             rec_inf.ref_depth++;
             cbor_item_t* new_item = NULL;
-            ret = _resolve_shared_item_ref(
-                rec_inf.tables, rec_inf.num_active, idx, rec_inf.ref_depth,
-                original_parent, outer_tag, &new_item);
+            ret = _resolve_shared_item_ref(rec_inf.packing_ctx, idx,
+                                           rec_inf.ref_depth, original_parent,
+                                           outer_tag, &new_item);
             if (ret == _TAG_1115) {
               if (original_parent.item == NULL) {
                 *new_parent = rec_inf.item;
@@ -716,12 +747,15 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
         case 113: {
           /* Consume the table definition, recieving the packing table and the
            * packed data */
-          packed_error_t ret =
-              _consume_table_113(rec_inf.parent, rec_inf.item, &rec_inf.item,
-                                 &rec_inf.tables[rec_inf.num_active]);
+          packed_error_t ret = _consume_table_113(
+              rec_inf.parent, rec_inf.item, &rec_inf.item,
+              &rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active]
+                   .basic.combined_table);
           CATCH_DECREF_RETURN(ret);
 
-          rec_inf.num_active++;
+          rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active].is_basic =
+              true;
+          rec_inf.packing_ctx.num_active++;
           if (rec_inf.parent.item == NULL) {
             *new_parent = rec_inf.item;
           }
@@ -735,9 +769,14 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
           /* Since _handle_tag_113 gave us ownership of the packing table, we
            * are responisble for feeing it after moving upwards out of its
            * scope */
-          cbor_decref(&rec_inf.tables[rec_inf.num_active - 1]);
+          cbor_decref(
+              &rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active - 1]
+                   .basic.combined_table);
+          if (rec_inf.parent.item != NULL) {
+            cbor_decref(&rec_inf.item);
+          }
 
-          rec_inf.num_active--;
+          rec_inf.packing_ctx.num_active--;
           CATCH_DECREF_RETURN(ret);
 
           if (rec_inf.parent.item == NULL) {
@@ -774,9 +813,8 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
           }
 
           cbor_item_t* argument = NULL;
-          packed_error_t ret =
-              _packing_table_get(rec_inf.tables, rec_inf.num_active, idx,
-                                 &argument, NULL, NULL, NULL);
+          packed_error_t ret = _packing_table_get(
+              rec_inf.packing_ctx, idx, true, &argument, NULL, NULL, NULL);
           CATCH_DECREF_RETURN(ret, argument);
           cbor_item_t* rump = cbor_tag_item(rec_inf.item);
           if (rump == NULL) {
@@ -805,15 +843,14 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
           }
 
           /* Unpack both recursively */
-          ret = _traverse(
-              _new_rec_info(rec_inf.tables, rump, rec_inf.item, 0, false,
-                            rec_inf.ref_depth, rec_inf.num_active),
-              &rump);
+          ret = _traverse(_new_rec_info(rec_inf.packing_ctx, rump, rec_inf.item,
+                                        0, false, rec_inf.ref_depth),
+                          &rump);
           CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument);
 
           ret = _traverse(
-              _new_rec_info(rec_inf.tables, argument, rec_inf.item, 0, false,
-                            rec_inf.ref_depth, rec_inf.num_active),
+              _new_rec_info(rec_inf.packing_ctx, argument, rec_inf.item, 0,
+                            false, rec_inf.ref_depth),
               &argument);
           CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument);
 
@@ -870,8 +907,8 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
         default: {
           cbor_item_t* tag_child = cbor_tag_item(rec_inf.item);
           packed_error_t ret = _traverse(
-              _new_rec_info(rec_inf.tables, tag_child, rec_inf.item, 0, false,
-                            rec_inf.ref_depth, rec_inf.num_active),
+              _new_rec_info(rec_inf.packing_ctx, tag_child, rec_inf.item, 0,
+                            false, rec_inf.ref_depth),
               &rec_inf.item);
           cbor_decref(&tag_child);
           CATCH_DECREF_RETURN(ret);
