@@ -4,6 +4,7 @@
 #include <cbor/data.h>
 #include <cbor/maps.h>
 #include <cbor/tags.h>
+#include <stdbool.h>
 #include "arrays.h"
 #include "floats_ctrls.h"
 #include "ints.h"
@@ -481,39 +482,88 @@ packed_error_t _replace(parent_t parent, cbor_item_t* old_item,
   return PACKED_ERR_NONE;
 }
 
-packed_error_t _consume_table_113(parent_t parent, cbor_item_t* item,
-                                  cbor_item_t** new_root,
-                                  cbor_item_t** new_table) {
+// If no err: if basic cbor *new_table_2 will still be Null (unchanged)
+packed_error_t _consume_table_definition(parent_t parent, cbor_item_t* item,
+                                         cbor_item_t** new_root,
+                                         cbor_item_t** new_table_1,
+                                         cbor_item_t** new_table_2) {
 #if PACKED_ENABLE_DEBUG
-  PRINT_DEBUG_MSG("handle_tag_113", item, parent.item);
+  PRINT_DEBUG_MSG("consume_table", item, parent.item);
 #endif
 
   cbor_item_t* arr = cbor_tag_item(item);
   if (arr == NULL || cbor_typeof(arr) != CBOR_TYPE_ARRAY) {
+    cbor_decref(&arr);
     return PACKED_ERR_UNEXPECTED_FORMAT;
   }
 
-  cbor_item_t* packing_table = cbor_array_get(arr, 0);
-  if (packing_table == NULL || cbor_typeof(packing_table) != CBOR_TYPE_ARRAY) {
-    cbor_decref(&arr);
-    cbor_decref(&packing_table);
-    return PACKED_ERR_UNEXPECTED_FORMAT;
-  }
+  cbor_item_t *packing_table_1, *packing_table_2, *packed_data = NULL;
+  switch (cbor_array_size(arr)) {
+    /* Basic cbor */
+    case 2: {
+      packing_table_1 = cbor_array_get(arr, 0);
+      if (packing_table_1 == NULL ||
+          cbor_typeof(packing_table_1) != CBOR_TYPE_ARRAY) {
+        cbor_decref(&packing_table_1);
+        cbor_decref(&arr);
+        return PACKED_ERR_UNEXPECTED_FORMAT;
+      }
 
-  cbor_item_t* packed_data = cbor_array_get(arr, 1);
-  if (packed_data == NULL) {
-    cbor_decref(&packing_table);
-    cbor_decref(&arr);
-    return PACKED_ERR_UNEXPECTED_FORMAT;
+      packed_data = cbor_array_get(arr, 1);
+      if (packed_data == NULL) {
+        cbor_decref(&packed_data);
+        cbor_decref(&packing_table_1);
+        cbor_decref(&arr);
+        return PACKED_ERR_UNEXPECTED_FORMAT;
+      }
+      break;
+    }
+    /* Split basic cbor*/
+    case 3: {
+      packing_table_1 = cbor_array_get(arr, 0);
+      if (packing_table_1 == NULL ||
+          cbor_typeof(packing_table_1) != CBOR_TYPE_ARRAY) {
+        cbor_decref(&packing_table_1);
+        cbor_decref(&arr);
+        return PACKED_ERR_UNEXPECTED_FORMAT;
+      }
+
+      packing_table_2 = cbor_array_get(arr, 1);
+      if (packing_table_2 == NULL ||
+          cbor_typeof(packing_table_2) != CBOR_TYPE_ARRAY) {
+        cbor_decref(&packing_table_2);
+        cbor_decref(&packing_table_1);
+        cbor_decref(&arr);
+        return PACKED_ERR_UNEXPECTED_FORMAT;
+      }
+
+      packed_data = cbor_array_get(arr, 2);
+      if (packed_data == NULL) {
+        cbor_decref(&packed_data);
+        cbor_decref(&packing_table_2);
+        cbor_decref(&packing_table_1);
+        cbor_decref(&arr);
+        return PACKED_ERR_UNEXPECTED_FORMAT;
+      }
+      break;
+    }
+    default: {
+      cbor_decref(&arr);
+      return PACKED_ERR_UNEXPECTED_FORMAT;
+    }
   }
 
   packed_error_t ret = _replace(parent, item, packed_data);
-  CATCH_DECREF_RETURN_1(ret, packed_data, packing_table, arr);
-
   cbor_decref(&arr);
+  CATCH_DECREF_RETURN_1(ret, packed_data, packing_table_1, packing_table_2);
+
   /* At this point item is mutated! */
-  *new_root = packed_data; /* == item */
-  *new_table = packing_table;
+  *new_root = packed_data;
+  *new_table_1 = packing_table_1;
+  if (new_table_2 != NULL) {
+    *new_table_2 = packing_table_2;
+  }
+
   return PACKED_ERR_NONE;
 }
 
@@ -747,10 +797,11 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
         case 113: {
           /* Consume the table definition, recieving the packing table and the
            * packed data */
-          packed_error_t ret = _consume_table_113(
+          packed_error_t ret = _consume_table_definition(
               rec_inf.parent, rec_inf.item, &rec_inf.item,
               &rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active]
-                   .basic.combined_table);
+                   .basic.combined_table,
+              NULL);
           CATCH_DECREF_RETURN(ret);
 
           rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active].is_basic =
@@ -775,7 +826,6 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
           if (rec_inf.parent.item != NULL) {
             cbor_decref(&rec_inf.item);
           }
-
           rec_inf.packing_ctx.num_active--;
           CATCH_DECREF_RETURN(ret);
 
@@ -900,6 +950,47 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
           cbor_decref(&rump);
           if (function_argument != NULL) {
             cbor_decref(&function_argument);
+          }
+          return PACKED_ERR_NONE;
+        }
+        /* Split basic Packed CBOR (shared table) */
+        case 1113: {
+          /* Consume table definition */
+          packed_error_t ret = _consume_table_definition(
+              rec_inf.parent, rec_inf.item, &rec_inf.item,
+              &rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active]
+                   .split.shareditem_table,
+              &rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active]
+                   .split.argument_table);
+          CATCH_DECREF_RETURN(ret);
+
+          rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active].is_basic =
+              false;
+          rec_inf.packing_ctx.num_active++;
+          if (rec_inf.parent.item == NULL) {
+            *new_parent = rec_inf.item;
+          }
+
+          /* Restart _traverse */
+          ret = _traverse(rec_inf, &rec_inf.item);
+          if (rec_inf.parent.item == NULL) {
+            *new_parent = rec_inf.item;
+          }
+          /* Free packing tables */
+          cbor_decref(
+              &rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active - 1]
+                   .split.shareditem_table);
+          cbor_decref(
+              &rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active - 1]
+                   .split.argument_table);
+          if (rec_inf.parent.item != NULL) {
+            cbor_decref(&rec_inf.item);
+          }
+          rec_inf.packing_ctx.num_active--;
+          CATCH_DECREF_RETURN(ret);
+
+          if (rec_inf.parent.item == NULL) {
+            *new_parent = rec_inf.item;
           }
           return PACKED_ERR_NONE;
         }

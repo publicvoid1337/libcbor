@@ -126,9 +126,10 @@ packed_error_t _packing_table_get(packing_ctx_t packing_ctx, size_t index,
 packed_error_t _replace(parent_t parent, cbor_item_t* old_item,
                         cbor_item_t* new_item);
 
-packed_error_t _consume_table_113(parent_t parent, cbor_item_t* item,
-                                  cbor_item_t** new_root,
-                                  cbor_item_t** new_table);
+packed_error_t _consume_table_definition(parent_t parent, cbor_item_t* item,
+                                         cbor_item_t** new_root,
+                                         cbor_item_t** new_table_1,
+                                         cbor_item_t** new_table_2);
 
 /* MAIN FUNCTION */
 packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item);
