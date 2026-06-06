@@ -616,6 +616,7 @@ packed_error_t _resolve_shared_item_ref(packing_ctx_t packing_ctx, size_t index,
     while (ret == _CURR_REPLACED) {                                    \
       assert(_replace(replace_ctx, old_item, recv_replacee) ==         \
              PACKED_ERR_NONE);                                         \
+      cbor_decref(&recv_replacee);                                     \
       rec_inf.curr = recv_replacee;                                    \
                                                                        \
       if (recv_tabledef.is_basic &&                                    \
@@ -651,14 +652,13 @@ packed_error_t _neo_traverse(neo_rec_inf_t rec_inf, cbor_item_t** replacee,
                              neo_tabledef_t* new_table) {
   switch (cbor_typeof(rec_inf.curr)) {
     case CBOR_TYPE_ARRAY: {
+      cbor_item_t** handle = cbor_array_handle(rec_inf.curr);
       for (size_t i = 0; i < cbor_array_size(rec_inf.curr); i++) {
-        cbor_item_t* child = cbor_array_get(rec_inf.curr, i);
-        neo_rec_inf_t next_rec_inf = {.curr = child,
+        neo_rec_inf_t next_rec_inf = {.curr = handle[i],
                                       .depth = rec_inf.depth,
                                       .tabledef = rec_inf.tabledef};
         parent_t replace_ctx = {.item = rec_inf.curr, .index = i};
-        _NEO_TRAVERSE_2(next_rec_inf, replace_ctx, child);
-        cbor_decref(&child);
+        _NEO_TRAVERSE_2(next_rec_inf, replace_ctx, handle[i]);
       }
       return PACKED_ERR_NONE;
     }
@@ -670,10 +670,11 @@ packed_error_t _neo_traverse(neo_rec_inf_t rec_inf, cbor_item_t** replacee,
                                       .tabledef = rec_inf.tabledef};
         parent_t replace_ctx = {
             .item = rec_inf.curr, .index = i, .is_key = true};
-        _NEO_TRAVERSE_2(rec_inf, replace_ctx, pairs[i].key);
+        _NEO_TRAVERSE_2(next_rec_inf, replace_ctx, pairs[i].key);
 
         replace_ctx.is_key = false;
-        _NEO_TRAVERSE_2(rec_inf, replace_ctx, pairs[i].value);
+        next_rec_inf.curr = pairs[i].value;
+        _NEO_TRAVERSE_2(next_rec_inf, replace_ctx, pairs[i].value);
       }
       return PACKED_ERR_NONE;
     }
