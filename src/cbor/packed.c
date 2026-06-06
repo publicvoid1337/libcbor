@@ -1,10 +1,12 @@
 #include "packed.h"
+#include <assert.h>
 #include <cbor/arrays.h>
 #include <cbor/common.h>
 #include <cbor/data.h>
 #include <cbor/maps.h>
 #include <cbor/tags.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include "arrays.h"
 #include "floats_ctrls.h"
 #include "ints.h"
@@ -575,6 +577,7 @@ packed_error_t _resolve_shared_item_ref(packing_ctx_t packing_ctx, size_t index,
     return PACKED_ERR_MAX_REF_DEPTH_EXCEEDED;
   }
 
+  // TODO: deep-copy packing table argument
   cbor_item_t* unpacked_item = NULL;
   packed_error_t ret = _packing_table_get(packing_ctx, index, false,
                                           &unpacked_item, NULL, NULL, NULL);
@@ -602,409 +605,105 @@ packed_error_t _resolve_shared_item_ref(packing_ctx_t packing_ctx, size_t index,
   return PACKED_ERR_NONE;
 }
 
-packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
+#define _NEO_TRAVERSE_2(rec_inf, replace_ctx, old_item)                \
+  do {                                                                 \
+    cbor_item_t* recv_replacee = NULL;                                 \
+    neo_tabledef_t recv_tabledef;                                      \
+    packed_error_t ret =                                               \
+        _neo_traverse(rec_inf, &recv_replacee, &recv_tabledef);        \
+                                                                       \
+    neo_tabledef_t* starting_table = rec_inf.tabledef;                 \
+    while (ret == _CURR_REPLACED) {                                    \
+      assert(_replace(replace_ctx, old_item, recv_replacee) ==         \
+             PACKED_ERR_NONE);                                         \
+      rec_inf.curr = recv_replacee;                                    \
+                                                                       \
+      if (recv_tabledef.is_basic &&                                    \
+          recv_tabledef.data.combined_table != NULL) {                 \
+        neo_tabledef_t* new_tabledef = malloc(sizeof(neo_tabledef_t)); \
+        *new_tabledef = recv_tabledef;                                 \
+        new_tabledef->prev = rec_inf.tabledef;                         \
+        rec_inf.tabledef = new_tabledef;                               \
+      }                                                                \
+                                                                       \
+      ret = _neo_traverse(rec_inf, &recv_replacee, &recv_tabledef);    \
+    }                                                                  \
+                                                                       \
+    while (rec_inf.tabledef != starting_table) {                       \
+      cbor_decref(&rec_inf.tabledef->data.combined_table);             \
+      neo_tabledef_t* next = rec_inf.tabledef->prev;                   \
+      free(rec_inf.tabledef);                                          \
+      rec_inf.tabledef = next;                                         \
+    }                                                                  \
+                                                                       \
+    if (ret != PACKED_ERR_NONE) {                                      \
+      return ret;                                                      \
+    }                                                                  \
+  } while (0)
+
 #if PACKED_ENABLE_DEBUG
-  PRINT_DEBUG_MSG("traverse", rec_inf.item, rec_inf.parent.item);
+size_t ctr = 0;
 #endif
 
-  switch (cbor_typeof(rec_inf.item)) {
-    case CBOR_TYPE_ARRAY: {
-      bool splice_afterwards = false;
-      for (size_t i = 0; i < cbor_array_size(rec_inf.item); i++) {
-        cbor_item_t* child = cbor_array_get(rec_inf.item, i);
-        packed_error_t ret =
-            _traverse(_new_rec_info(rec_inf.packing_ctx, child, rec_inf.item, i,
-                                    false, rec_inf.ref_depth),
-                      &rec_inf.item);
-        cbor_decref(&child);
-        /* Splicing Integration Tag Callback (could probably be done nicer)*/
-        if (ret == _TAG_1115) {
-          splice_afterwards = true;
-        } else {
-          CATCH_DECREF_RETURN(ret);
-        }
-      }
-      if (splice_afterwards) {
-        cbor_item_t* res = NULL;
-        packed_error_t ret = _splice(rec_inf.item, rec_inf.parent, &res);
-        CATCH_DECREF_RETURN(ret, res);
+// packed_error_t _neo_print_dbg(const char* module_name, cbor_item_t* curr, )
 
-        ret = _replace(rec_inf.parent, rec_inf.item, res);
-        CATCH_DECREF_RETURN(ret, res);
-        rec_inf.item = res;
-        if (rec_inf.parent.item == NULL) {
-          *new_parent = rec_inf.item;
-        }
+packed_error_t _neo_traverse(neo_rec_inf_t rec_inf, cbor_item_t** replacee,
+                             neo_tabledef_t* new_table) {
+  switch (cbor_typeof(rec_inf.curr)) {
+    case CBOR_TYPE_ARRAY: {
+      for (size_t i = 0; i < cbor_array_size(rec_inf.curr); i++) {
+        cbor_item_t* child = cbor_array_get(rec_inf.curr, i);
+        neo_rec_inf_t next_rec_inf = {.curr = child,
+                                      .depth = rec_inf.depth,
+                                      .tabledef = rec_inf.tabledef};
+        parent_t replace_ctx = {.item = rec_inf.curr, .index = i};
+        _NEO_TRAVERSE_2(next_rec_inf, replace_ctx, child);
+        cbor_decref(&child);
       }
       return PACKED_ERR_NONE;
     }
     case CBOR_TYPE_MAP: {
-      struct cbor_pair* pairs = cbor_map_handle(rec_inf.item);
-      /* Pairwise recursive calls with increasing index */
-      for (size_t i = 0; i < cbor_map_size(rec_inf.item); i++) {
-        packed_error_t ret =
-            _traverse(_new_rec_info(rec_inf.packing_ctx, pairs[i].key,
-                                    rec_inf.item, i, true, rec_inf.ref_depth),
-                      &rec_inf.item);
-        CATCH_DECREF_RETURN(ret);
+      struct cbor_pair* pairs = cbor_map_handle(rec_inf.curr);
+      for (size_t i = 0; i < cbor_map_size(rec_inf.curr); i++) {
+        neo_rec_inf_t next_rec_inf = {.curr = pairs[i].key,
+                                      .depth = rec_inf.depth,
+                                      .tabledef = rec_inf.tabledef};
+        parent_t replace_ctx = {
+            .item = rec_inf.curr, .index = i, .is_key = true};
+        _NEO_TRAVERSE_2(rec_inf, replace_ctx, pairs[i].key);
 
-        ret =
-            _traverse(_new_rec_info(rec_inf.packing_ctx, pairs[i].value,
-                                    rec_inf.item, i, false, rec_inf.ref_depth),
-                      &rec_inf.item);
-        CATCH_DECREF_RETURN(ret);
-      }
-      return PACKED_ERR_NONE;
-    }
-    case CBOR_TYPE_FLOAT_CTRL: {
-      /* Simple value in range 0-15 => Shared item refrence */
-      if (cbor_float_ctrl_is_ctrl(rec_inf.item) &&
-          (cbor_ctrl_value(rec_inf.item) <= 15)) {
-        cbor_item_t* new_item = NULL;
-        size_t idx = cbor_ctrl_value(rec_inf.item);
-        rec_inf.ref_depth++;
-        packed_error_t ret = _resolve_shared_item_ref(
-            rec_inf.packing_ctx, idx, rec_inf.ref_depth, rec_inf.parent,
-            rec_inf.item, &new_item);
-        CATCH_DECREF_RETURN(ret);
-
-        rec_inf.item = new_item;
-        if (rec_inf.parent.item == NULL) {
-          *new_parent = rec_inf.item;
-        }
-
-        /* Recursively unpack */
-        ret = _traverse(rec_inf, &rec_inf.item);
-        if (rec_inf.parent.item == NULL) {
-          *new_parent = rec_inf.item;
-        }
-        CATCH_DECREF_RETURN(ret);
+        replace_ctx.is_key = false;
+        _NEO_TRAVERSE_2(rec_inf, replace_ctx, pairs[i].value);
       }
       return PACKED_ERR_NONE;
     }
     case CBOR_TYPE_TAG: {
-      switch (cbor_tag_value(rec_inf.item)) {
-        /* Argument or shared item reference */
-        case 6: {
-          cbor_item_t* tag_arg = cbor_tag_item(rec_inf.item);
-          if (tag_arg == NULL) {
-            return PACKED_ERR_UNEXPECTED_FORMAT;
-          }
-
-          if (cbor_typeof(tag_arg) == CBOR_TYPE_UINT ||
-              cbor_typeof(tag_arg) == CBOR_TYPE_NEGINT) {
-            cbor_item_t* new_item = NULL;
-            size_t idx = (cbor_typeof(tag_arg) == CBOR_TYPE_UINT)
-                             ? (16 + 2 * cbor_get_int(tag_arg))
-                             : (16 - 2 * cbor_get_int(tag_arg) - 1);
-            /* TODO: Debug purposes only*/
-            idx = cbor_get_int(tag_arg);
-            /* */
-            rec_inf.ref_depth++;
-            packed_error_t ret = _resolve_shared_item_ref(
-                rec_inf.packing_ctx, idx, rec_inf.ref_depth, rec_inf.parent,
-                rec_inf.item, &new_item);
-            if (ret == _TAG_1115) {
-              if (rec_inf.parent.item == NULL) {
-                *new_parent = rec_inf.item;
-              }
-              return ret;
-            }
-            CATCH_DECREF_RETURN(ret);
-
-            rec_inf.item = new_item;
-            if (rec_inf.parent.item == NULL) {
-              *new_parent = rec_inf.item;
-            }
-
-            /* Recursively unpack */
-            ret = _traverse(rec_inf, &rec_inf.item);
-            if (rec_inf.parent.item == NULL) {
-              *new_parent = rec_inf.item;
-            }
-            CATCH_DECREF_RETURN(ret);
-
-            cbor_decref(&tag_arg);
-            return PACKED_ERR_NONE;
-          } else {
-            /* The tag argument is not a plain integer — resolve it recursively
-             * to obtain the index, then replace the entire TAG(6) node in its
-             * original parent. */
-
-            /* Preserve the original parent before we do anything else. */
-            parent_t original_parent = rec_inf.parent;
-            cbor_item_t* outer_tag = rec_inf.item;
-
-            /* Traverse tag_arg with outer_tag as its parent so that _replace()
-             * inside the traversal updates outer_tag's content in-place once
-             * the inner reference resolves to an integer. */
-            cbor_item_t* new_inner = NULL;
-            packed_error_t ret =
-                _traverse(_new_rec_info(rec_inf.packing_ctx, tag_arg, outer_tag,
-                                        0, false, rec_inf.ref_depth),
-                          &new_inner);
-            cbor_decref(&tag_arg);
-            CATCH_DECREF_RETURN(ret);
-
-            /* Read the now-resolved integer index back from outer_tag's
-             * content. */
-            cbor_item_t* resolved_idx_item = cbor_tag_item(outer_tag);
-            if (resolved_idx_item == NULL) {
-              return PACKED_ERR_UNEXPECTED_FORMAT;
-            }
-
-            size_t idx = (cbor_typeof(resolved_idx_item) == CBOR_TYPE_UINT)
-                             ? (16 + 2 * cbor_get_int(resolved_idx_item))
-                             : (16 - 2 * cbor_get_int(resolved_idx_item) - 1);
-            /* TODO: Debug purposes only */
-            idx = cbor_get_int(resolved_idx_item);
-            /* */
-            cbor_decref(&resolved_idx_item);
-
-            /* Replace outer_tag in its *original* parent with the looked-up
-             * shared item — not in outer_tag itself. */
-            rec_inf.ref_depth++;
-            cbor_item_t* new_item = NULL;
-            ret = _resolve_shared_item_ref(rec_inf.packing_ctx, idx,
-                                           rec_inf.ref_depth, original_parent,
-                                           outer_tag, &new_item);
-            if (ret == _TAG_1115) {
-              if (original_parent.item == NULL) {
-                *new_parent = rec_inf.item;
-              }
-              return ret;
-            }
-            CATCH_DECREF_RETURN(ret);
-
-            rec_inf.item = new_item;
-            rec_inf.parent = original_parent;
-            if (original_parent.item == NULL) {
-              *new_parent = rec_inf.item;
-            }
-
-            /* Recursively unpack the resolved item. */
-            ret = _traverse(rec_inf, &rec_inf.item);
-            if (original_parent.item == NULL) {
-              *new_parent = rec_inf.item;
-            }
-            CATCH_DECREF_RETURN(ret);
-
-            return PACKED_ERR_NONE;
-          }
-          return PACKED_ERR_NOT_SUPPORTED;
-        }
-        /* Basic Packed CBOR (shared table) */
+      switch (cbor_tag_value(rec_inf.curr)) {
         case 113: {
-          /* Consume the table definition, recieving the packing table and the
-           * packed data */
-          packed_error_t ret = _consume_table_definition(
-              rec_inf.parent, rec_inf.item, &rec_inf.item,
-              &rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active]
-                   .basic.combined_table,
-              NULL);
-          CATCH_DECREF_RETURN(ret);
+          cbor_item_t* enclosing_arr = cbor_tag_item(rec_inf.curr);
+          assert(enclosing_arr != NULL);
+          assert(cbor_array_size(enclosing_arr) == 2);
 
-          rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active].is_basic =
-              true;
-          rec_inf.packing_ctx.num_active++;
-          if (rec_inf.parent.item == NULL) {
-            *new_parent = rec_inf.item;
-          }
-          /* Restart _traverse from the packed data!
-           * Note: rec_inf pointers are already updated, since we passed them
-           * directly above.*/
-          ret = _traverse(rec_inf, &rec_inf.item);
-          if (rec_inf.parent.item == NULL) {
-            *new_parent = rec_inf.item;
-          }
-          /* Since _handle_tag_113 gave us ownership of the packing table, we
-           * are responisble for feeing it after moving upwards out of its
-           * scope */
-          cbor_decref(
-              &rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active - 1]
-                   .basic.combined_table);
-          if (rec_inf.parent.item != NULL) {
-            cbor_decref(&rec_inf.item);
-          }
-          rec_inf.packing_ctx.num_active--;
-          CATCH_DECREF_RETURN(ret);
-
-          if (rec_inf.parent.item == NULL) {
-            *new_parent = rec_inf.item;
-          }
-          return PACKED_ERR_NONE;
-        }
-        /* Argument refrence */
-        case 128:
-        case 129:
-        case 130:
-        case 131:
-        case 132:
-        case 133:
-        case 134:
-        case 135:
-        case 136:
-        case 137:
-        case 138:
-        case 139:
-        case 140:
-        case 141:
-        case 142:
-        case 143: {
-          /* Get rump and argument */
-          size_t idx;
-          bool is_straight;
-          if (cbor_tag_value(rec_inf.item) < 136) {
-            idx = cbor_tag_value(rec_inf.item) - 128;
-            is_straight = true;
+          cbor_item_t* table = cbor_array_get(enclosing_arr, 0);
+          assert(table != NULL);
+          assert(cbor_typeof(table) == CBOR_TYPE_ARRAY);
+          if (rec_inf.tabledef == NULL) {
+            neo_tabledef_t tabledef = {
+                .data.combined_table = table, .is_basic = true, .prev = NULL};
+            *new_table = tabledef;
           } else {
-            idx = cbor_tag_value(rec_inf.item) - 136;
-            is_straight = false;
+            neo_tabledef_t tabledef = {.data.combined_table = table,
+                                       .is_basic = true,
+                                       .prev = rec_inf.tabledef};
+            *new_table = tabledef;
           }
 
-          cbor_item_t* argument = NULL;
-          packed_error_t ret = _packing_table_get(
-              rec_inf.packing_ctx, idx, true, &argument, NULL, NULL, NULL);
-          CATCH_DECREF_RETURN(ret, argument);
-          cbor_item_t* rump = cbor_tag_item(rec_inf.item);
-          if (rump == NULL) {
-            cbor_decref(&argument);
-            return PACKED_ERR_UNEXPECTED_FORMAT;
-          }
+          cbor_item_t* packed_data = cbor_array_get(enclosing_arr, 1);
+          assert(packed_data != NULL);
+          *replacee = packed_data;
 
-          /* Determine lhs and rhs as well as function to be applied */
-          cbor_item_t* lhs = is_straight ? argument : rump;
-          cbor_item_t* rhs = is_straight ? rump : argument;
-          cbor_item_t* function_argument = NULL;
-
-          /* TODO: Implement handling of function tags as described in the
-           * packed cbor specification */
-          int function_id = 0;
-          if (cbor_typeof(lhs) == CBOR_TYPE_TAG) {
-            function_id = cbor_tag_value(lhs);
-            // we do not modify the function tag itself
-            function_argument = cbor_tag_item(lhs);
-            if (function_argument == NULL) {
-              cbor_decref(&argument);
-              cbor_decref(&rump);
-              return PACKED_ERR_UNEXPECTED_FORMAT;
-            }
-            lhs = function_argument;
-          }
-
-          /* Unpack both recursively */
-          ret = _traverse(_new_rec_info(rec_inf.packing_ctx, rump, rec_inf.item,
-                                        0, false, rec_inf.ref_depth),
-                          &rump);
-          CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument);
-
-          ret = _traverse(
-              _new_rec_info(rec_inf.packing_ctx, argument, rec_inf.item, 0,
-                            false, rec_inf.ref_depth),
-              &argument);
-          CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument);
-
-          /* Apply function */
-          cbor_item_t* res = NULL;
-          switch (function_id) {
-            /* No function tag specified - concatenate */
-            case 0: {
-              ret = _concatenate(lhs, rhs, &res, cbor_typeof(rump));
-              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
-                                    res);
-              break;
-            }
-            /* Interchanged join */
-            case 105: {
-              ret = _join(rhs, lhs, &res);
-              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
-                                    res);
-              break;
-            }
-            /* Join*/
-            case 106: {
-              ret = _join(lhs, rhs, &res);
-              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
-                                    res);
-              break;
-            }
-            /* Record */
-            case 114: {
-              ret = _record(lhs, rhs, &res);
-              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
-                                    res);
-              break;
-            }
-          }
-
-          /* Replace reference with result of function application */
-          ret = _replace(rec_inf.parent, rec_inf.item, res);
-          CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument, res);
-          rec_inf.item = res;
-          if (rec_inf.parent.item == NULL) {
-            *new_parent = rec_inf.item;
-          }
-
-          cbor_decref(&rec_inf.item);
-          cbor_decref(&argument);
-          cbor_decref(&rump);
-          if (function_argument != NULL) {
-            cbor_decref(&function_argument);
-          }
-          return PACKED_ERR_NONE;
-        }
-        /* Split basic Packed CBOR (shared table) */
-        case 1113: {
-          /* Consume table definition */
-          packed_error_t ret = _consume_table_definition(
-              rec_inf.parent, rec_inf.item, &rec_inf.item,
-              &rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active]
-                   .split.shareditem_table,
-              &rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active]
-                   .split.argument_table);
-          CATCH_DECREF_RETURN(ret);
-
-          rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active].is_basic =
-              false;
-          rec_inf.packing_ctx.num_active++;
-          if (rec_inf.parent.item == NULL) {
-            *new_parent = rec_inf.item;
-          }
-
-          /* Restart _traverse */
-          ret = _traverse(rec_inf, &rec_inf.item);
-          if (rec_inf.parent.item == NULL) {
-            *new_parent = rec_inf.item;
-          }
-          /* Free packing tables */
-          cbor_decref(
-              &rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active - 1]
-                   .split.shareditem_table);
-          cbor_decref(
-              &rec_inf.packing_ctx.tables[rec_inf.packing_ctx.num_active - 1]
-                   .split.argument_table);
-          if (rec_inf.parent.item != NULL) {
-            cbor_decref(&rec_inf.item);
-          }
-          rec_inf.packing_ctx.num_active--;
-          CATCH_DECREF_RETURN(ret);
-
-          if (rec_inf.parent.item == NULL) {
-            *new_parent = rec_inf.item;
-          }
-          return PACKED_ERR_NONE;
-        }
-        /* Tag not specified by packed cbor */
-        default: {
-          cbor_item_t* tag_child = cbor_tag_item(rec_inf.item);
-          packed_error_t ret = _traverse(
-              _new_rec_info(rec_inf.packing_ctx, tag_child, rec_inf.item, 0,
-                            false, rec_inf.ref_depth),
-              &rec_inf.item);
-          cbor_decref(&tag_child);
-          CATCH_DECREF_RETURN(ret);
-
-          return PACKED_ERR_NONE;
+          cbor_decref(&enclosing_arr);
+          return _CURR_REPLACED;
         }
       }
     }
@@ -1012,5 +711,39 @@ packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent) {
       /* Normal leaf node */
       return PACKED_ERR_NONE;
     }
+  }
+}
+
+cbor_item_t* cbor_unpack(cbor_item_t* target,
+                         neo_tabledef_t* global_packing_table) {
+  // TODO: Should probably deep copy target
+  neo_rec_inf_t rec_inf = {
+      .curr = target, .depth = 0, .tabledef = global_packing_table};
+  cbor_item_t* recv_replacee = NULL;
+  neo_tabledef_t recv_tabledef;
+  packed_error_t ret = _neo_traverse(rec_inf, &recv_replacee, &recv_tabledef);
+
+  while (ret == _CURR_REPLACED) {
+    cbor_decref(&rec_inf.curr);
+    rec_inf.curr = recv_replacee;
+    if (recv_tabledef.is_basic && recv_tabledef.data.combined_table != NULL) {
+      neo_tabledef_t* new_tabledef = malloc(sizeof(neo_tabledef_t));
+      *new_tabledef = recv_tabledef;
+      new_tabledef->prev = rec_inf.tabledef;
+      rec_inf.tabledef = new_tabledef;
+    }
+    ret = _neo_traverse(rec_inf, &recv_replacee, &recv_tabledef);
+  }
+  while (rec_inf.tabledef != global_packing_table) {
+    cbor_decref(&rec_inf.tabledef->data.combined_table);
+    neo_tabledef_t* next = rec_inf.tabledef->prev;
+    free(rec_inf.tabledef);
+    rec_inf.tabledef = next;
+  }
+
+  if (ret != PACKED_ERR_NONE) {
+    return NULL;
+  } else {
+    return rec_inf.curr;
   }
 }

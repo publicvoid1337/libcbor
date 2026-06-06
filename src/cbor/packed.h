@@ -1,4 +1,5 @@
 // TODO: Fix imports
+#include <stdint.h>
 #include "cbor.h"
 
 /* DEFINES */
@@ -16,7 +17,8 @@ typedef enum {
   PACKED_ERR_MAX_REF_DEPTH_EXCEEDED,
   _NESTED,
   _RESOLVE_THEN_REPLACE,
-  _TAG_1115
+  _TAG_1115,
+  _CURR_REPLACED,
 } packed_error_t;
 
 typedef struct {
@@ -51,6 +53,27 @@ typedef struct {
   packing_ctx_t packing_ctx;
   uint8_t ref_depth;
 } recursion_info_t;
+
+typedef struct neo_tabledef_s neo_tabledef_t;
+typedef struct neo_tabledef_s {
+  neo_tabledef_t* prev;
+  bool is_basic;
+  union {
+    struct {
+      cbor_item_t* combined_table;
+    };
+    struct {
+      cbor_item_t* shareditem_table;
+      cbor_item_t* argument_table;
+    };
+  } data;
+} neo_tabledef_t;
+
+typedef struct {
+  cbor_item_t* curr;
+  neo_tabledef_t* tabledef;
+  uint8_t depth;
+} neo_rec_inf_t;
 
 /* HELPER FUNCTIONS */
 recursion_info_t _new_rec_info(packing_ctx_t new_packing_ctx,
@@ -132,4 +155,10 @@ packed_error_t _consume_table_definition(parent_t parent, cbor_item_t* item,
                                          cbor_item_t** new_table_2);
 
 /* MAIN FUNCTION */
-packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_item);
+packed_error_t _traverse(recursion_info_t rec_inf, cbor_item_t** new_parent,
+                         cbor_item_t** replacee);
+
+packed_error_t _neo_traverse(neo_rec_inf_t rec_inf, cbor_item_t** replacee,
+                             neo_tabledef_t* new_table);
+cbor_item_t* cbor_unpack(cbor_item_t* target,
+                         neo_tabledef_t* global_packing_table);

@@ -1,3 +1,4 @@
+#include <cbor.h>
 #include <cbor/serialization.h>
 #include "../src/cbor/packed.h"
 
@@ -79,9 +80,15 @@ unsigned char EXAMPLE[] = {
     0x2D, 0x63, 0x6F, 0x6E, 0x74, 0x65, 0x78, 0x74, 0x2E, 0x6A, 0x73, 0x6F,
     0x6E, 0x6C, 0x64};
 
+unsigned char TEST1[] = {0xD8, 0x71, 0x82, 0x80, 0x18, 0x43};
+unsigned char TEST2[] = {0xD8, 0x71, 0x82, 0x80, 0xD8,
+                         0x71, 0x82, 0x80, 0x18, 0x43};
+unsigned char TEST3[] = {0x81, 0xD8, 0x71, 0x82, 0x80, 0xD8,
+                         0x71, 0x82, 0x80, 0x18, 0x43};
+
 int main(void) {
   struct cbor_load_result res;
-  cbor_item_t* item = cbor_load(EXAMPLE, sizeof(EXAMPLE), &res);
+  cbor_item_t* item = cbor_load(TEST3, sizeof(TEST3), &res);
   assert(res.error.code == CBOR_ERR_NONE);
 
   puts("\n");
@@ -89,27 +96,14 @@ int main(void) {
   size_t serialized_size = cbor_serialized_size(item);
   printf("  ---->  Serialized size: %zu bytes\n\n", serialized_size);
 
-  packing_ctx_t packing_ctx;
-  recursion_info_t rec_inf =
-      _new_rec_info(packing_ctx, item, NULL, 0, false, 0);
-  cbor_item_t* new_item = NULL;
-  packed_error_t ret = _traverse(rec_inf, &new_item);
-  if (new_item != NULL) {
-    rec_inf.item = new_item;
-  }
-  if (ret != PACKED_ERR_NONE) {
-    printf("\nCRASHED: %s\n", describe_error(ret));
+  cbor_item_t* out;
+  out = cbor_unpack(item, NULL);
+  if (out == NULL) {
+    puts("CRASHED");
   } else {
-    puts("");
-    cbor_describe(rec_inf.item, stdout);
-    serialized_size = cbor_serialized_size(rec_inf.item);
-    printf("  ---->  Serialized size: %zu bytes\n", serialized_size);
+    cbor_describe(out, stdout);
   }
+  cbor_decref(&out);
 
-  cbor_decref(&rec_inf.item);
-  // if (rec_inf.num_active > 0) {
-  //   cbor_decref(&rec_inf.tables[rec_inf.num_active - 1]);
-  //   rec_inf.num_active--;
-  // }
   return 0;
 }
