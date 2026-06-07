@@ -6,8 +6,11 @@
 #include <cbor/maps.h>
 #include <cbor/tags.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <cstdint>
 #include "arrays.h"
+#include "data.h"
 #include "floats_ctrls.h"
 #include "ints.h"
 #include "maps.h"
@@ -646,10 +649,41 @@ packed_error_t _resolve_shared_item_ref(packing_ctx_t packing_ctx, size_t index,
 size_t ctr = 0;
 #endif
 
-// packed_error_t _neo_print_dbg(const char* module_name, cbor_item_t* curr, )
+packed_error_t _neo_tabledef_get(neo_tabledef_t* table, size_t idx,
+                                 cbor_item_t** out) {
+  if (table->is_basic) {
+    while (table != NULL) {
+      size_t table_len = cbor_array_size(table->data.combined_table);
+      if (idx < table_len) {
+        *out = cbor_copy(cbor_array_handle(table->data.combined_table)[idx]);
+        return PACKED_ERR_NONE;
+      }
+      idx -= table_len;
+      table = table->prev;
+    }
+    return PACKED_ERR_UNDEFINED_REFERENCE;
+  } else {
+    return PACKED_ERR_NOT_SUPPORTED;
+  }
+}
+
+packed_error_t _neo_resolve_shared_ref() {}
+
+typedef struct {
+  packed_error_t err;
+  bool increase_depth : 1;
+  bool new_tabledef : 1;
+  neo_tabledef_t new_table;
+  bool replace_child : 1;
+  cbor_item_t* new_child;
+} packed_response_t;
 
 packed_error_t _neo_traverse(neo_rec_inf_t rec_inf, cbor_item_t** replacee,
                              neo_tabledef_t* new_table) {
+  // INIT
+  *new_table = (neo_tabledef_t){0};
+  *replacee = NULL;
+
   switch (cbor_typeof(rec_inf.curr)) {
     case CBOR_TYPE_ARRAY: {
       cbor_item_t** handle = cbor_array_handle(rec_inf.curr);
@@ -675,6 +709,19 @@ packed_error_t _neo_traverse(neo_rec_inf_t rec_inf, cbor_item_t** replacee,
         replace_ctx.is_key = false;
         next_rec_inf.curr = pairs[i].value;
         _NEO_TRAVERSE_2(next_rec_inf, replace_ctx, pairs[i].value);
+      }
+      return PACKED_ERR_NONE;
+    }
+    case CBOR_TYPE_FLOAT_CTRL: {
+      if (cbor_float_ctrl_is_ctrl(rec_inf.curr) &&
+          cbor_ctrl_value(rec_inf.curr) < 16) {
+        packed_error_t ret = _neo_tabledef_get(
+            rec_inf.tabledef, cbor_ctrl_value(rec_inf.curr), replacee);
+        if (ret != PACKED_ERR_NONE) {
+          return ret;
+        }
+
+        return _CURR_REPLACED;
       }
       return PACKED_ERR_NONE;
     }
@@ -706,6 +753,116 @@ packed_error_t _neo_traverse(neo_rec_inf_t rec_inf, cbor_item_t** replacee,
           cbor_decref(&enclosing_arr);
           return _CURR_REPLACED;
         }
+        /* Argument refrence */
+        case 128:
+        case 129:
+        case 130:
+        case 131:
+        case 132:
+        case 133:
+        case 134:
+        case 135:
+        case 136:
+        case 137:
+        case 138:
+        case 139:
+        case 140:
+        case 141:
+        case 142:
+        case 143: {
+          /* Get rump and argument */
+          size_t idx;
+          bool is_straight;
+          if (cbor_tag_value(rec_inf.curr) < 136) {
+            idx = cbor_tag_value(rec_inf.curr) - 128;
+            is_straight = true;
+          } else {
+            idx = cbor_tag_value(rec_inf.curr) - 136;
+            is_straight = false;
+          }
+
+          cbor_item_t* argument = NULL;
+          packed_error_t ret =
+              _neo_tabledef_get(rec_inf.tabledef, idx, &argument);
+          if (ret != PACKED_ERR_NONE) {
+            return ret;
+          }
+
+          cbor_item_t* rump = cbor_tag_item(rec_inf.curr);
+          if (rump == NULL) {
+            cbor_decref(&argument);
+            return PACKED_ERR_UNEXPECTED_FORMAT;
+          }
+
+          /* Determine lhs and rhs as well as function to be applied */
+          cbor_item_t* lhs = is_straight ? argument : rump;
+          cbor_item_t* rhs = is_straight ? rump : argument;
+          cbor_item_t* function_argument = NULL;
+
+          int function_id = 0;
+          if (cbor_typeof(lhs) == CBOR_TYPE_TAG) {
+            function_id = cbor_tag_value(lhs);
+            // we do not modify the function tag itself
+            function_argument = cbor_tag_item(lhs);
+            if (function_argument == NULL) {
+              cbor_decref(&argument);
+              cbor_decref(&rump);
+              return PACKED_ERR_UNEXPECTED_FORMAT;
+            }
+            lhs = function_argument;
+          }
+
+          /* Unpack both recursively */
+          rec_inf.curr = rump;
+          parent_t replace_ctx = {.item = rec_inf.curr};
+          _NEO_TRAVERSE_2(rec_inf, replace_ctx, rump);
+
+          rec_inf.curr = argument;
+          cbor_item_t* wrapper = cbor_new_definite_array(1);
+          cbor_array_handle(wrapper)[0] = argument;
+          replace_ctx.item = wrapper;
+          replace_ctx.index = 0;
+          _NEO_TRAVERSE_2(rec_inf, replace_ctx, argument);
+
+          /* Apply function */
+          cbor_item_t* res = NULL;
+          switch (function_id) {
+            /* No function tag specified - concatenate */
+            case 0: {
+              ret = _concatenate(lhs, rhs, &res, cbor_typeof(rump));
+              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
+                                    res);
+              break;
+            }
+            /* Interchanged join */
+            case 105: {
+              ret = _join(rhs, lhs, &res);
+              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
+                                    res);
+              break;
+            }
+            /* Join*/
+            case 106: {
+              ret = _join(lhs, rhs, &res);
+              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
+                                    res);
+              break;
+            }
+            /* Record */
+            case 114: {
+              ret = _record(lhs, rhs, &res);
+              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
+                                    res);
+              break;
+            }
+          }
+
+          /* Replace reference with result of function application */
+          cbor_decref(&argument);
+          cbor_decref(&rump);
+          *replacee = res;
+          return _CURR_REPLACED;
+        }
       }
     }
     default: {
@@ -717,6 +874,10 @@ packed_error_t _neo_traverse(neo_rec_inf_t rec_inf, cbor_item_t** replacee,
 
 cbor_item_t* cbor_unpack(cbor_item_t* target,
                          neo_tabledef_t* global_packing_table) {
+  // cbor_item_t* wrapper = cbor_new_definite_array(1);
+  // cbor_array_push(wrapper, target);
+  //  target = wrapper;
+
   // TODO: Should probably deep copy target
   neo_rec_inf_t rec_inf = {
       .curr = target, .depth = 0, .tabledef = global_packing_table};
@@ -743,6 +904,7 @@ cbor_item_t* cbor_unpack(cbor_item_t* target,
   }
 
   if (ret != PACKED_ERR_NONE) {
+    cbor_decref(&rec_inf.curr);
     return NULL;
   } else {
     return rec_inf.curr;
