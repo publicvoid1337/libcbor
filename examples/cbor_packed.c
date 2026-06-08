@@ -1,4 +1,5 @@
 #include <cbor.h>
+#include <cbor/common.h>
 #include <cbor/serialization.h>
 #include "../src/cbor/packed.h"
 
@@ -111,8 +112,7 @@ static const unsigned char ARG_REF_CONCAT[] = {
 
 int main(void) {
   struct cbor_load_result res;
-  cbor_item_t* item =
-      cbor_load(SIMPLE_undef_ref, sizeof(SIMPLE_undef_ref), &res);
+  cbor_item_t* item = cbor_load(ARG_REF_CONCAT, sizeof(ARG_REF_CONCAT), &res);
   assert(res.error.code == CBOR_ERR_NONE);
 
   puts("\n");
@@ -120,13 +120,12 @@ int main(void) {
   size_t serialized_size = cbor_serialized_size(item);
   printf("  ---->  Serialized size: %zu bytes\n\n", serialized_size);
 
-  cbor_item_t* out;
-  out = cbor_unpack(item, NULL);
-  if (out == NULL) {
-    puts("CRASHED");
+  cbor_item_t* ret = cbor_unpack(item, NULL);
+  if (ret == NULL) {
+    printf("CRASHED: %s\n", describe_error(PACKED_ERR_NONE));
   } else {
-    cbor_describe(out, stdout);
-    cbor_decref(&out);
+    cbor_describe(ret, stdout);
+    cbor_decref(&ret);
   }
 
   return 0;
