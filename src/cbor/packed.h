@@ -4,7 +4,7 @@
 #include "cbor.h"
 
 /* DEFINES */
-#define PACKED_ENABLE_DEBUG 0
+#define PACKED_ENABLE_DEBUG 1
 #define MAX_REFERENCE_DEPTH 5
 
 /* TYPEDEFS */

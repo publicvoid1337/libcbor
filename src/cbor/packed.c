@@ -1,6 +1,9 @@
 #include "packed.h"
+#include <cbor/common.h>
+#include <cbor/data.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "ints.h"
 
 const char* describe_error(packed_error_t error) {
   switch (error) {
@@ -452,24 +455,24 @@ packed_error_t _neo_tabledef_get(neo_tabledef_t* table, size_t idx,
   }
 }
 
-packed_response_t _handle_shared_item_ref(neo_rec_inf_t* rec_inf) {
+packed_response_t _handle_shared_item_ref(neo_rec_inf_t* rec_inf, size_t idx) {
   packed_response_t resp = {0};
 
   if (rec_inf->depth >= MAX_REFERENCE_DEPTH) {
     resp.err = PACKED_ERR_MAX_REF_DEPTH_EXCEEDED;
 #if PACKED_ENABLE_DEBUG
-    _print_dbg(true, "traverse", rec_inf->curr,
+    _print_dbg(true, "handle_shared_ref", rec_inf->curr,
                PACKED_ERR_MAX_REF_DEPTH_EXCEEDED);
 #endif
     return resp;
   }
 
-  packed_error_t ret = _neo_tabledef_get(
-      rec_inf->tabledef, cbor_ctrl_value(rec_inf->curr), &resp.data.new_child);
+  packed_error_t ret =
+      _neo_tabledef_get(rec_inf->tabledef, idx, &resp.data.new_child);
   if (ret != PACKED_ERR_NONE) {
     resp.err = ret;
 #if PACKED_ENABLE_DEBUG
-    _print_dbg(true, "traverse", rec_inf->curr, ret);
+    _print_dbg(true, "handle_shared_ref", rec_inf->curr, ret);
 #endif
     return resp;
   }
@@ -478,7 +481,110 @@ packed_response_t _handle_shared_item_ref(neo_rec_inf_t* rec_inf) {
   resp.flags.increase_depth = true;
   resp.flags.replace_child = true;
 #if PACKED_ENABLE_DEBUG
-  _print_dbg(true, "traverse", resp.data.new_child, PACKED_ERR_NONE);
+  _print_dbg(true, "handle_shared_ref", resp.data.new_child, PACKED_ERR_NONE);
+#endif
+  return resp;
+}
+
+packed_response_t _handle_arg_ref(neo_rec_inf_t* rec_inf, size_t idx,
+                                  bool is_straight) {
+  packed_response_t resp = {0};
+
+  /* Get argument and rump*/
+  cbor_item_t* argument = NULL;
+  packed_error_t ret = _neo_tabledef_get(rec_inf->tabledef, idx, &argument);
+  if (ret != PACKED_ERR_NONE) {
+    resp.err = ret;
+#if PACKED_ENABLE_DEBUG
+    _print_dbg(true, "traverse", rec_inf->curr, ret);
+#endif
+    return resp;
+  }
+
+  cbor_item_t* rump = cbor_tag_item(rec_inf->curr);
+  if (rump == NULL) {
+    cbor_decref(&argument);
+    resp.err = PACKED_ERR_UNEXPECTED_FORMAT;
+#if PACKED_ENABLE_DEBUG
+    _print_dbg(true, "traverse", rec_inf->curr, PACKED_ERR_UNEXPECTED_FORMAT);
+#endif
+    return resp;
+  }
+
+  /* Determine lhs and rhs as well as function to be applied */
+  cbor_item_t* lhs = is_straight ? argument : rump;
+  cbor_item_t* rhs = is_straight ? rump : argument;
+  cbor_item_t* function_argument = NULL;
+
+  int function_id = 0;
+  if (cbor_typeof(lhs) == CBOR_TYPE_TAG) {
+    function_id = cbor_tag_value(lhs);
+    // we do not modify the function tag itself
+    function_argument = cbor_tag_item(lhs);
+    if (function_argument == NULL) {
+      cbor_decref(&argument);
+      cbor_decref(&rump);
+      resp.err = PACKED_ERR_UNEXPECTED_FORMAT;
+#if PACKED_ENABLE_DEBUG
+      _print_dbg(true, "traverse", rec_inf->curr, PACKED_ERR_UNEXPECTED_FORMAT);
+#endif
+      return resp;
+    }
+    lhs = function_argument;
+  }
+
+  /* Unpack both recursively */
+  rec_inf->curr = rump;
+  parent_t replace_ctx = {.item = rec_inf->curr};
+  _NEO_TRAVERSE_2((*rec_inf), replace_ctx, rump);
+
+  rec_inf->curr = argument;
+  cbor_item_t* wrapper = cbor_new_definite_array(1);
+  cbor_array_handle(wrapper)[0] = argument;
+  replace_ctx.item = wrapper;
+  replace_ctx.index = 0;
+  _NEO_TRAVERSE_2((*rec_inf), replace_ctx, argument);
+  cbor_decref(&wrapper);
+
+  /* Apply function */
+  cbor_item_t* res = NULL;
+  switch (function_id) {
+    /* No function tag specified - concatenate */
+    case 0: {
+      ret = _concatenate(lhs, rhs, &res, cbor_typeof(rump));
+      CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument, res);
+      break;
+    }
+    /* Interchanged join */
+    case 105: {
+      ret = _join(rhs, lhs, &res);
+      CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument, res);
+      break;
+    }
+    /* Join*/
+    case 106: {
+      ret = _join(lhs, rhs, &res);
+      CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument, res);
+      break;
+    }
+    /* Record */
+    case 114: {
+      ret = _record(lhs, rhs, &res);
+      CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument, res);
+      break;
+    }
+  }
+
+  /* Replace reference with result of function application */
+  if (function_argument != NULL) {
+    cbor_decref(&function_argument);
+  }
+  cbor_decref(&argument);
+  cbor_decref(&rump);
+  resp.flags.replace_child = true;
+  resp.data.new_child = res;
+#if PACKED_ENABLE_DEBUG
+  _print_dbg(true, "traverse", res, PACKED_ERR_NONE);
 #endif
   return resp;
 }
@@ -532,7 +638,7 @@ packed_response_t _neo_traverse(neo_rec_inf_t rec_inf) {
 
       if (cbor_float_ctrl_is_ctrl(rec_inf.curr) &&
           cbor_ctrl_value(rec_inf.curr) < 16) {
-        return _handle_shared_item_ref(&rec_inf);
+        return _handle_shared_item_ref(&rec_inf, cbor_ctrl_value(rec_inf.curr));
       }
 
       resp.err = PACKED_ERR_NONE;
@@ -545,6 +651,39 @@ packed_response_t _neo_traverse(neo_rec_inf_t rec_inf) {
       packed_response_t resp = {0};
 
       switch (cbor_tag_value(rec_inf.curr)) {
+        case 6: {
+          packed_response_t resp = {0};
+
+          cbor_item_t* child = cbor_tag_item(rec_inf.curr);
+        x:
+          if (child == NULL) {
+            resp.err = PACKED_ERR_UNEXPECTED_FORMAT;
+#if PACKED_ENABLE_DEBUG
+            _print_dbg(true, "traverse", rec_inf.curr,
+                       PACKED_ERR_UNEXPECTED_FORMAT);
+#endif
+            return resp;
+          }
+
+          if (cbor_typeof(child) == CBOR_TYPE_UINT ||
+              cbor_typeof(child) == CBOR_TYPE_NEGINT) {
+            // TODO: correct index calculation
+            size_t idx = cbor_get_int(child);
+            cbor_decref(&child);
+
+            return _handle_shared_item_ref(&rec_inf, idx);
+          } else {
+            cbor_item_t* _child = child;
+            neo_rec_inf_t next_rec_inf = {.curr = child,
+                                          .depth = rec_inf.depth,
+                                          .tabledef = rec_inf.tabledef};
+            parent_t replace_ctx = {.item = rec_inf.curr};
+            _NEO_TRAVERSE_2(next_rec_inf, replace_ctx, child);
+
+            cbor_decref(&child);
+            return _neo_traverse(rec_inf);
+          }
+        }
         case 113: {
           cbor_item_t* enclosing_arr = cbor_tag_item(rec_inf.curr);
           if (enclosing_arr == NULL || cbor_array_size(enclosing_arr) != 2) {
@@ -625,109 +764,7 @@ packed_response_t _neo_traverse(neo_rec_inf_t rec_inf) {
             is_straight = false;
           }
 
-          cbor_item_t* argument = NULL;
-          packed_error_t ret =
-              _neo_tabledef_get(rec_inf.tabledef, idx, &argument);
-          if (ret != PACKED_ERR_NONE) {
-            resp.err = ret;
-#if PACKED_ENABLE_DEBUG
-            _print_dbg(true, "traverse", rec_inf.curr, ret);
-#endif
-            return resp;
-          }
-
-          cbor_item_t* rump = cbor_tag_item(rec_inf.curr);
-          if (rump == NULL) {
-            cbor_decref(&argument);
-            resp.err = PACKED_ERR_UNEXPECTED_FORMAT;
-#if PACKED_ENABLE_DEBUG
-            _print_dbg(true, "traverse", rec_inf.curr,
-                       PACKED_ERR_UNEXPECTED_FORMAT);
-#endif
-            return resp;
-          }
-
-          /* Determine lhs and rhs as well as function to be applied */
-          cbor_item_t* lhs = is_straight ? argument : rump;
-          cbor_item_t* rhs = is_straight ? rump : argument;
-          cbor_item_t* function_argument = NULL;
-
-          int function_id = 0;
-          if (cbor_typeof(lhs) == CBOR_TYPE_TAG) {
-            function_id = cbor_tag_value(lhs);
-            // we do not modify the function tag itself
-            function_argument = cbor_tag_item(lhs);
-            if (function_argument == NULL) {
-              cbor_decref(&argument);
-              cbor_decref(&rump);
-              resp.err = PACKED_ERR_UNEXPECTED_FORMAT;
-#if PACKED_ENABLE_DEBUG
-              _print_dbg(true, "traverse", rec_inf.curr,
-                         PACKED_ERR_UNEXPECTED_FORMAT);
-#endif
-              return resp;
-            }
-            lhs = function_argument;
-          }
-
-          /* Unpack both recursively */
-          rec_inf.curr = rump;
-          parent_t replace_ctx = {.item = rec_inf.curr};
-          _NEO_TRAVERSE_2(rec_inf, replace_ctx, rump);
-
-          rec_inf.curr = argument;
-          cbor_item_t* wrapper = cbor_new_definite_array(1);
-          cbor_array_handle(wrapper)[0] = argument;
-          replace_ctx.item = wrapper;
-          replace_ctx.index = 0;
-          _NEO_TRAVERSE_2(rec_inf, replace_ctx, argument);
-          cbor_decref(&wrapper);
-
-          /* Apply function */
-          cbor_item_t* res = NULL;
-          switch (function_id) {
-            /* No function tag specified - concatenate */
-            case 0: {
-              ret = _concatenate(lhs, rhs, &res, cbor_typeof(rump));
-              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
-                                    res);
-              break;
-            }
-            /* Interchanged join */
-            case 105: {
-              ret = _join(rhs, lhs, &res);
-              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
-                                    res);
-              break;
-            }
-            /* Join*/
-            case 106: {
-              ret = _join(lhs, rhs, &res);
-              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
-                                    res);
-              break;
-            }
-            /* Record */
-            case 114: {
-              ret = _record(lhs, rhs, &res);
-              CATCH_DECREF_RETURN_1(ret, argument, rump, function_argument,
-                                    res);
-              break;
-            }
-          }
-
-          /* Replace reference with result of function application */
-          if (function_argument != NULL) {
-            cbor_decref(&function_argument);
-          }
-          cbor_decref(&argument);
-          cbor_decref(&rump);
-          resp.flags.replace_child = true;
-          resp.data.new_child = res;
-#if PACKED_ENABLE_DEBUG
-          _print_dbg(true, "traverse", res, PACKED_ERR_NONE);
-#endif
-          return resp;
+          return _handle_arg_ref(&rec_inf, idx, is_straight);
         }
       }
     }
