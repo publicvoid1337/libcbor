@@ -452,6 +452,37 @@ packed_error_t _neo_tabledef_get(neo_tabledef_t* table, size_t idx,
   }
 }
 
+packed_response_t _handle_shared_item_ref(neo_rec_inf_t* rec_inf) {
+  packed_response_t resp = {0};
+
+  if (rec_inf->depth >= MAX_REFERENCE_DEPTH) {
+    resp.err = PACKED_ERR_MAX_REF_DEPTH_EXCEEDED;
+#if PACKED_ENABLE_DEBUG
+    _print_dbg(true, "traverse", rec_inf->curr,
+               PACKED_ERR_MAX_REF_DEPTH_EXCEEDED);
+#endif
+    return resp;
+  }
+
+  packed_error_t ret = _neo_tabledef_get(
+      rec_inf->tabledef, cbor_ctrl_value(rec_inf->curr), &resp.data.new_child);
+  if (ret != PACKED_ERR_NONE) {
+    resp.err = ret;
+#if PACKED_ENABLE_DEBUG
+    _print_dbg(true, "traverse", rec_inf->curr, ret);
+#endif
+    return resp;
+  }
+
+  resp.err = PACKED_ERR_NONE;
+  resp.flags.increase_depth = true;
+  resp.flags.replace_child = true;
+#if PACKED_ENABLE_DEBUG
+  _print_dbg(true, "traverse", resp.data.new_child, PACKED_ERR_NONE);
+#endif
+  return resp;
+}
+
 packed_response_t _neo_traverse(neo_rec_inf_t rec_inf) {
 #if PACKED_ENABLE_DEBUG
   _print_dbg(false, "traverse", rec_inf.curr, PACKED_ERR_NONE);
@@ -501,32 +532,7 @@ packed_response_t _neo_traverse(neo_rec_inf_t rec_inf) {
 
       if (cbor_float_ctrl_is_ctrl(rec_inf.curr) &&
           cbor_ctrl_value(rec_inf.curr) < 16) {
-        if (rec_inf.depth >= MAX_REFERENCE_DEPTH) {
-          resp.err = PACKED_ERR_MAX_REF_DEPTH_EXCEEDED;
-#if PACKED_ENABLE_DEBUG
-          _print_dbg(true, "traverse", rec_inf.curr,
-                     PACKED_ERR_MAX_REF_DEPTH_EXCEEDED);
-#endif
-          return resp;
-        }
-        packed_error_t ret =
-            _neo_tabledef_get(rec_inf.tabledef, cbor_ctrl_value(rec_inf.curr),
-                              &resp.data.new_child);
-        if (ret != PACKED_ERR_NONE) {
-          resp.err = ret;
-#if PACKED_ENABLE_DEBUG
-          _print_dbg(true, "traverse", rec_inf.curr, ret);
-#endif
-          return resp;
-        }
-
-        resp.err = PACKED_ERR_NONE;
-        resp.flags.increase_depth = true;
-        resp.flags.replace_child = true;
-#if PACKED_ENABLE_DEBUG
-        _print_dbg(true, "traverse", resp.data.new_child, PACKED_ERR_NONE);
-#endif
-        return resp;
+        return _handle_shared_item_ref(&rec_inf);
       }
 
       resp.err = PACKED_ERR_NONE;
