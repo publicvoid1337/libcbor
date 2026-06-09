@@ -102,7 +102,6 @@ void print_item_info(cbor_item_t* target, char* identifier) {
 
 #if PACKED_ENABLE_DEBUG
 static int ctr = 0;
-#endif
 
 void _print_dbg(bool is_return, const char* fn_name, cbor_item_t* curr,
                 packed_error_t err) {
@@ -116,6 +115,11 @@ void _print_dbg(bool is_return, const char* fn_name, cbor_item_t* curr,
     ctr++;
   }
 }
+#endif
+
+//
+//
+//
 
 packed_error_t _concatenate(cbor_item_t* lhs, cbor_item_t* rhs,
                             cbor_item_t** out, cbor_type string_out_type) {
@@ -412,6 +416,9 @@ packed_error_t _replace(parent_t parent, cbor_item_t* old_item,
         new_tabledef->prev = rec_inf.tabledef;                         \
         rec_inf.tabledef = new_tabledef;                               \
       }                                                                \
+      if (resp.flags.increase_depth) {                                 \
+        rec_inf.depth++;                                               \
+      }                                                                \
     } while (resp.flags.replace_child);                                \
                                                                        \
     while (rec_inf.tabledef != starting_table) {                       \
@@ -494,6 +501,14 @@ packed_response_t _neo_traverse(neo_rec_inf_t rec_inf) {
 
       if (cbor_float_ctrl_is_ctrl(rec_inf.curr) &&
           cbor_ctrl_value(rec_inf.curr) < 16) {
+        if (rec_inf.depth >= MAX_REFERENCE_DEPTH) {
+          resp.err = PACKED_ERR_MAX_REF_DEPTH_EXCEEDED;
+#if PACKED_ENABLE_DEBUG
+          _print_dbg(true, "traverse", rec_inf.curr,
+                     PACKED_ERR_MAX_REF_DEPTH_EXCEEDED);
+#endif
+          return resp;
+        }
         packed_error_t ret =
             _neo_tabledef_get(rec_inf.tabledef, cbor_ctrl_value(rec_inf.curr),
                               &resp.data.new_child);
@@ -506,7 +521,11 @@ packed_response_t _neo_traverse(neo_rec_inf_t rec_inf) {
         }
 
         resp.err = PACKED_ERR_NONE;
+        resp.flags.increase_depth = true;
         resp.flags.replace_child = true;
+#if PACKED_ENABLE_DEBUG
+        _print_dbg(true, "traverse", resp.data.new_child, PACKED_ERR_NONE);
+#endif
         return resp;
       }
 
@@ -692,6 +711,9 @@ packed_response_t _neo_traverse(neo_rec_inf_t rec_inf) {
           }
 
           /* Replace reference with result of function application */
+          if (function_argument != NULL) {
+            cbor_decref(&function_argument);
+          }
           cbor_decref(&argument);
           cbor_decref(&rump);
           resp.flags.replace_child = true;
@@ -736,6 +758,9 @@ cbor_item_t* cbor_unpack(cbor_item_t* target,
     if (resp.flags.replace_child) {
       cbor_decref(&rec_inf.curr);
       rec_inf.curr = resp.data.new_child;
+    }
+    if (resp.flags.increase_depth) {
+      rec_inf.depth++;
     }
   } while (resp.flags.replace_child);
 
