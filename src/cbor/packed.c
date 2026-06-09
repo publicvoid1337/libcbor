@@ -1,8 +1,12 @@
 #include "packed.h"
+#include <cbor/arrays.h>
 #include <cbor/common.h>
 #include <cbor/data.h>
+#include <cbor/strings.h>
+#include <cbor/tags.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "arrays.h"
 #include "ints.h"
 
 const char* describe_error(packed_error_t error) {
@@ -311,32 +315,27 @@ packed_error_t _record(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out) {
   return PACKED_ERR_NONE;
 }
 
-packed_error_t _splice(cbor_item_t* arg,
-                       parent_t parent __attribute__((unused)),
+packed_error_t _splice(cbor_item_t* outer_arr, cbor_item_t* splicee, size_t idx,
                        cbor_item_t** out) {
-  cbor_item_t* res = cbor_new_indefinite_array();
-  for (size_t i = 0; i < cbor_array_size(arg); i++) {
-    cbor_item_t* child = cbor_array_get(arg, i);
-    if (cbor_typeof(child) == CBOR_TYPE_TAG && cbor_tag_value(child) == 1115) {
-      cbor_item_t* tag_arg = cbor_tag_item(child);
-      if (tag_arg == NULL || cbor_typeof(tag_arg) != CBOR_TYPE_ARRAY) {
-        if (tag_arg != NULL) {
-          cbor_decref(&tag_arg);
-        }
-        cbor_decref(&child);
-        cbor_decref(&res);
-        return PACKED_ERR_UNEXPECTED_FORMAT;
+  if (outer_arr == NULL || cbor_typeof(outer_arr) != CBOR_TYPE_ARRAY ||
+      splicee == NULL || cbor_typeof(splicee) != CBOR_TYPE_ARRAY) {
+    return PACKED_ERR_UNEXPECTED_FORMAT;
+  }
+  size_t arr_len = cbor_array_size(outer_arr);
+  cbor_item_t** arr_handle = cbor_array_handle(outer_arr);
+  size_t splicee_len = cbor_array_size(splicee);
+  cbor_item_t** splicee_handle = cbor_array_handle(splicee);
+  cbor_item_t* res = cbor_new_definite_array(arr_len + splicee_len);
+  cbor_item_t** res_handle = cbor_array_handle(res);
+
+  for (size_t i = 0; i < arr_len; i++) {
+    if (i == idx) {
+      for (size_t j = 0; j < splicee_len; j++) {
+        cbor_array_push(res, splicee_handle[j]);
       }
-      for (size_t j = 0; j < cbor_array_size(tag_arg); j++) {
-        cbor_item_t* spliced_child = cbor_array_get(tag_arg, j);
-        assert(cbor_array_push(res, spliced_child));
-        cbor_decref(&spliced_child);
-      }
-      cbor_decref(&tag_arg);
     } else {
-      assert(cbor_array_push(res, child));
+      cbor_array_push(res, arr_handle[i]);
     }
-    cbor_decref(&child);
   }
 
   *out = res;
@@ -595,6 +594,9 @@ packed_response_t _neo_traverse(neo_rec_inf_t rec_inf) {
 #endif
   switch (cbor_typeof(rec_inf.curr)) {
     case CBOR_TYPE_ARRAY: {
+      packed_response_t resp = {0};
+
+      bool was_spliced = false;
       cbor_item_t** handle = cbor_array_handle(rec_inf.curr);
       for (size_t i = 0; i < cbor_array_size(rec_inf.curr); i++) {
         neo_rec_inf_t next_rec_inf = {.curr = handle[i],
@@ -602,9 +604,32 @@ packed_response_t _neo_traverse(neo_rec_inf_t rec_inf) {
                                       .tabledef = rec_inf.tabledef};
         parent_t replace_ctx = {.item = rec_inf.curr, .index = i};
         _NEO_TRAVERSE_2(next_rec_inf, replace_ctx, handle[i]);
+
+        if (cbor_typeof(handle[i]) == CBOR_TYPE_TAG &&
+            cbor_tag_value(handle[i]) == 1115) {
+          cbor_item_t* res = NULL;
+          cbor_item_t* splicee = cbor_tag_item(handle[i]);
+          packed_error_t ret = _splice(rec_inf.curr, splicee, i, &res);
+          cbor_decref(&handle[i]);
+          if (ret != PACKED_ERR_NONE) {
+            resp.err = ret;
+#if PACKED_ENABLE_DEBUG
+            _print_dbg(true, "traverse", rec_inf.curr, ret);
+#endif
+            return resp;
+          }
+
+          rec_inf.curr = res;
+          handle = cbor_array_handle(rec_inf.curr);
+          was_spliced = true;
+          i--; /* Redo traverse call on spliced array */
+        }
       }
 
-      packed_response_t resp = {0};
+      if (was_spliced) {
+        resp.flags.replace_child = true;
+        resp.data.new_child = rec_inf.curr;
+      }
       resp.err = PACKED_ERR_NONE;
 #if PACKED_ENABLE_DEBUG
       _print_dbg(true, "traverse", rec_inf.curr, PACKED_ERR_NONE);
@@ -765,6 +790,17 @@ packed_response_t _neo_traverse(neo_rec_inf_t rec_inf) {
           }
 
           return _handle_arg_ref(&rec_inf, idx, is_straight);
+        }
+        case 1115: {
+          cbor_item_t* arg = cbor_tag_item(rec_inf.curr);
+          if (arg == NULL || cbor_typeof(arg) != CBOR_TYPE_ARRAY) {
+            resp.err = PACKED_ERR_UNEXPECTED_FORMAT;
+#if PACKED_ENABLE_DEBUG
+            _print_dbg(true, "traverse", rec_inf.curr,
+                       PACKED_ERR_UNEXPECTED_FORMAT);
+#endif
+            return resp;
+          }
         }
       }
     }
