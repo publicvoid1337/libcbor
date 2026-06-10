@@ -86,8 +86,8 @@ static const unsigned char SIMPLE_loop[] = {0xD8, 0x71, 0x82, 0x82,
 
 int main(void) {
   struct cbor_load_result res;
-  cbor_item_t* item = cbor_load(SHARED_REF_SPLICING_INT_TAG,
-                                sizeof(SHARED_REF_SPLICING_INT_TAG), &res);
+  cbor_item_t* item =
+      cbor_load(ARG_REF_RECORD_2, sizeof(ARG_REF_RECORD_2), &res);
   assert(res.error.code == CBOR_ERR_NONE);
 
   puts("\n");

@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "arrays.h"
+#include "common.h"
 #include "ints.h"
 
 const char* describe_error(packed_error_t error) {
@@ -610,7 +611,11 @@ packed_response_t _neo_traverse(neo_rec_inf_t rec_inf) {
           cbor_item_t* res = NULL;
           cbor_item_t* splicee = cbor_tag_item(handle[i]);
           packed_error_t ret = _splice(rec_inf.curr, splicee, i, &res);
-          cbor_decref(&handle[i]);
+          assert(cbor_refcount(handle[i]) == 1);
+          // only god knows why refcount(splicee) == 3
+          cbor_decref(&splicee);
+          cbor_decref(&splicee);
+
           if (ret != PACKED_ERR_NONE) {
             resp.err = ret;
 #if PACKED_ENABLE_DEBUG
