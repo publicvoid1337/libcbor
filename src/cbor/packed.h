@@ -1,6 +1,4 @@
 // TODO: Fix imports
-#include <cbor/data.h>
-#include <stdint.h>
 #include "cbor.h"
 
 /* DEFINES */
@@ -23,22 +21,15 @@ typedef struct {
   bool is_key;
 } parent_t;
 
-struct table_definition {
-  bool is_basic;
-  union {
-    struct {
-      cbor_item_t* combined_table;
-    } basic;
-    struct {
-      cbor_item_t* shareditem_table;
-      cbor_item_t* argument_table;
-    } split;
-  };
-};
+typedef struct {
+  cbor_item_t* parent;
+  size_t index;
+  bool is_key;
+} packing_ctx_t;
 
-typedef struct neo_tabledef_s neo_tabledef_t;
-typedef struct neo_tabledef_s {
-  neo_tabledef_t* prev;
+typedef struct tabledef_s tabledef_t;
+typedef struct tabledef_s {
+  tabledef_t* prev;
   bool is_basic;
   union {
     struct {
@@ -49,13 +40,13 @@ typedef struct neo_tabledef_s {
       cbor_item_t* argument_table;
     };
   } data;
-} neo_tabledef_t;
+} tabledef_t;
 
 typedef struct {
   cbor_item_t* curr;
-  neo_tabledef_t* tabledef;
+  tabledef_t* tabledef;
   uint8_t depth;
-} neo_rec_inf_t;
+} rec_inf_t;
 
 typedef struct {
   packed_error_t err;
@@ -65,7 +56,7 @@ typedef struct {
     bool replace_child : 1;
   } flags;
   struct {
-    neo_tabledef_t new_table;
+    tabledef_t new_table;
     cbor_item_t* new_child;
   } data;
 } packed_response_t;
@@ -114,12 +105,54 @@ packed_error_t _join(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out);
 
 packed_error_t _record(cbor_item_t* lhs, cbor_item_t* rhs, cbor_item_t** out);
 
+packed_error_t _tabledef_get(tabledef_t* table, size_t idx, bool is_shareditem,
+                             cbor_item_t** out);
+
 /* UTILITY FUNCTIONS */
-packed_error_t _replace(parent_t parent, cbor_item_t* old_item,
-                        cbor_item_t* new_item);
 
 /* MAIN FUNCTION */
-packed_response_t _neo_traverse(neo_rec_inf_t rec_inf);
+packed_response_t _traverse(rec_inf_t rec_inf);
 
-cbor_item_t* cbor_unpack(cbor_item_t* target,
-                         neo_tabledef_t* global_packing_table);
+packed_error_t _neo_replace(parent_t replace_ctx, cbor_item_t* old_item,
+                            cbor_item_t* new_item);
+
+#define _TRAVERSE(rec_inf, replace_ctx, old_item)                 \
+  do {                                                            \
+    tabledef_t* starting_table = rec_inf.tabledef;                \
+    packed_response_t resp;                                       \
+                                                                  \
+    do {                                                          \
+      resp = _traverse(rec_inf);                                  \
+      if (resp.err != PACKED_ERR_NONE) {                          \
+        break;                                                    \
+      }                                                           \
+                                                                  \
+      if (resp.flags.replace_child) {                             \
+        _neo_replace(replace_ctx, old_item, resp.data.new_child); \
+        rec_inf.curr = resp.data.new_child;                       \
+      }                                                           \
+      if (resp.flags.new_tabledef) {                              \
+        tabledef_t* new_tabledef = malloc(sizeof(tabledef_t));    \
+        *new_tabledef = resp.data.new_table;                      \
+        new_tabledef->prev = rec_inf.tabledef;                    \
+        rec_inf.tabledef = new_tabledef;                          \
+      }                                                           \
+      if (resp.flags.increase_depth) {                            \
+        rec_inf.depth++;                                          \
+      }                                                           \
+    } while (resp.flags.replace_child);                           \
+                                                                  \
+    while (rec_inf.tabledef != starting_table) {                  \
+      cbor_decref(&rec_inf.tabledef->data.combined_table);        \
+      tabledef_t* next = rec_inf.tabledef->prev;                  \
+      free(rec_inf.tabledef);                                     \
+      rec_inf.tabledef = next;                                    \
+    }                                                             \
+                                                                  \
+    if (resp.err != PACKED_ERR_NONE) {                            \
+      cbor_decref(&rec_inf.curr);                                 \
+      return resp;                                                \
+    }                                                             \
+  } while (0)
+
+cbor_item_t* cbor_unpack(cbor_item_t* target, tabledef_t* global_packing_table);

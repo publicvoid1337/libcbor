@@ -392,7 +392,7 @@ int main(void) {
       cmocka_unit_test(test_ARG_REF_IJOIN_2_IMPLICIT),
       cmocka_unit_test(test_ARG_REF_RECORD),
       // cmocka_unit_test(test_ARG_REF_RECORD_2),
-      //    cmocka_unit_test(test_SHARED_REF_SPLICING_INT_TAG),
+      cmocka_unit_test(test_SHARED_REF_SPLICING_INT_TAG),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
